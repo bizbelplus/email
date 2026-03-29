@@ -18,6 +18,7 @@ from .config import ConfigError, load_config
 from .recipients import RecipientsError, load_recipients
 from .renderer import TemplateRenderer
 from .smtp_client import SMTPMailer
+from .validators import validate_csv_recipients
 
 
 def _send_with_retry(
@@ -139,6 +140,18 @@ def run_preflight(
         checks.append(f"Получатели загружены: {len(recipients)}")
     except RecipientsError as error:
         return PreflightReport(checks=checks, warnings=warnings, errors=[str(error)])
+
+    # Email validation
+    email_validation = validate_csv_recipients(str(recipients_path))
+    if email_validation.get("error"):
+        warnings.append(f"Ошибка валидации email: {email_validation['error']}")
+    else:
+        invalid_count = email_validation.get("total_invalid", 0)
+        warning_count = email_validation.get("total_warnings", 0)
+        if invalid_count > 0:
+            errors.append(f"Невалидные email-адреса: {invalid_count}")
+        if warning_count > 0:
+            warnings.append(f"Email-адреса с предупреждениями: {warning_count}")
 
     template_name = template_override or config.message.template
     renderer = TemplateRenderer(templates_path)

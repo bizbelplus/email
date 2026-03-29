@@ -41,6 +41,9 @@ class ModernEmailAppGUI:
         self.preview_window = None
         self.preview_html_widget = None
         self.preview_source_text = None
+        
+        # Theme preference
+        self.theme_var = ctk.StringVar(value="dark")
 
         self.root = ctk.CTk()
         self.root.title("Email App – Modern SMTP Campaign Manager")
@@ -69,15 +72,33 @@ class ModernEmailAppGUI:
         main_container.pack(fill="both", expand=True)
         main_container.grid_columnconfigure(0, weight=1)
 
-        # === ЗАГОЛОВОК ===
+        # === ЗАГОЛОВОК С ПЕРЕКЛЮЧАТЕЛЕМ ТЕМЫ ===
         header = self.ctk.CTkFrame(main_container, fg_color=("gray90", "gray15"), corner_radius=12)
         header.pack(fill="x", padx=16, pady=(16, 8))
+        
+        header_row = self.ctk.CTkFrame(header, fg_color="transparent")
+        header_row.pack(fill="x", padx=16, pady=12)
+        header_row.grid_columnconfigure(0, weight=1)
+        
         self.ctk.CTkLabel(
-            header,
+            header_row,
             text="📧 SMTP Campaign Manager",
             font=("", 20, "bold"),
             text_color=("gray10", "gray90"),
-        ).pack(anchor="w", padx=16, pady=12)
+        ).grid(row=0, column=0, sticky="w")
+        
+        # Theme switcher
+        theme_frame = self.ctk.CTkFrame(header_row, fg_color="transparent")
+        theme_frame.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        self.ctk.CTkLabel(theme_frame, text="🌙 Тема:").pack(side="left", padx=(0, 6))
+        theme_combo = self.ctk.CTkComboBox(
+            theme_frame,
+            values=["dark", "light"],
+            variable=self.theme_var,
+            width=80,
+            command=self._on_theme_change,
+        )
+        theme_combo.pack(side="left")
 
         # === ПУТИ И КОНФИГ (Раздел 1) ===
         config_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
@@ -731,6 +752,11 @@ class ModernEmailAppGUI:
             return str(path.relative_to(self.base_dir))
         except ValueError:
             return str(path)
+
+    def _on_theme_change(self) -> None:
+        """Handle theme change."""
+        theme = self.theme_var.get()
+        self.ctk.set_appearance_mode(theme)
 
     def run(self) -> None:
         self.root.mainloop()
