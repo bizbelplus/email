@@ -35,6 +35,12 @@ class DeliverySettings:
     skip_previously_sent: bool = False
     dedupe_template_scope: bool = True
     dedupe_history_days: int = 30
+    # Scheduling & rate limiting
+    scheduled_time: str | None = None  # ISO 8601, e.g. "2025-03-30T10:00:00"
+    rate_limit_per_minute: int | None = None  # Max emails/minute
+    # Retry on failure
+    retry_attempts: int = 1
+    retry_backoff_seconds: float = 5.0
 
 
 @dataclass(slots=True)

@@ -96,6 +96,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         skip_previously_sent=bool(delivery_raw.get("skip_previously_sent", False)),
         dedupe_template_scope=bool(delivery_raw.get("dedupe_template_scope", True)),
         dedupe_history_days=int(delivery_raw.get("dedupe_history_days", 30)),
+        scheduled_time=str(delivery_raw["scheduled_time"]) if delivery_raw.get("scheduled_time") else None,
+        rate_limit_per_minute=int(delivery_raw["rate_limit_per_minute"]) if delivery_raw.get("rate_limit_per_minute") else None,
+        retry_attempts=int(delivery_raw.get("retry_attempts", 1)),
+        retry_backoff_seconds=float(delivery_raw.get("retry_backoff_seconds", 5.0)),
     )
 
     if not isinstance(content_raw, dict):

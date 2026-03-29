@@ -28,6 +28,13 @@ delivery:
   skip_previously_sent: false
   dedupe_template_scope: true
   dedupe_history_days: 30
+  # Планировщик отправок (ISO 8601, e.g. "2025-03-30T10:00:00", или null для немедленно)
+  scheduled_time: null
+  # Rate limiting: макс писем в минуту (null = без ограничений)
+  rate_limit_per_minute: null
+  # Автоматический retry при временных ошибках
+  retry_attempts: 1
+  retry_backoff_seconds: 5.0
 
 content:
   headline: "Добро пожаловать"

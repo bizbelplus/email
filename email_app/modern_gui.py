@@ -43,17 +43,20 @@ class ModernEmailAppGUI:
         self.preview_source_text = None
 
         self.root = ctk.CTk()
-        self.root.title("Email App Modern")
-        self.root.geometry("1100x820")
-        self.root.minsize(900, 680)
+        self.root.title("Email App – Modern SMTP Campaign Manager")
+        self.root.geometry("1200x920")
+        self.root.minsize(1000, 750)
 
         self.config_var = ctk.StringVar(value="config/settings.yaml")
         self.recipients_var = ctk.StringVar(value="recipients.csv")
         self.templates_var = ctk.StringVar(value="templates")
         self.template_var = ctk.StringVar(value="")
         self.delay_var = ctk.StringVar(value="0")
+        self.rate_limit_var = ctk.StringVar(value="")
+        self.retry_attempts_var = ctk.StringVar(value="1")
+        self.retry_backoff_var = ctk.StringVar(value="5")
         self.dry_run_var = ctk.BooleanVar(value=True)
-        self.status_var = ctk.StringVar(value="Готово к запуску")
+        self.status_var = ctk.StringVar(value="✓ Готово к запуску")
 
         self._build()
         if self.current_preset_path:
@@ -62,85 +65,151 @@ class ModernEmailAppGUI:
         self.root.after(150, self._poll_queue)
 
     def _build(self) -> None:
-        container = self.ctk.CTkFrame(self.root, corner_radius=16)
-        container.pack(fill="both", expand=True, padx=16, pady=16)
-        container.grid_columnconfigure(1, weight=1)
-        container.grid_rowconfigure(8, weight=1)
+        main_container = self.ctk.CTkScrollableFrame(self.root, corner_radius=0)
+        main_container.pack(fill="both", expand=True)
+        main_container.grid_columnconfigure(0, weight=1)
 
-        self._add_path_row(container, 0, "Конфиг", self.config_var, self._select_config)
-        self._add_path_row(container, 1, "Получатели", self.recipients_var, self._select_recipients)
-        self._add_path_row(container, 2, "Шаблоны", self.templates_var, self._select_templates)
+        # === ЗАГОЛОВОК ===
+        header = self.ctk.CTkFrame(main_container, fg_color=("gray90", "gray15"), corner_radius=12)
+        header.pack(fill="x", padx=16, pady=(16, 8))
+        self.ctk.CTkLabel(
+            header,
+            text="📧 SMTP Campaign Manager",
+            font=("", 20, "bold"),
+            text_color=("gray10", "gray90"),
+        ).pack(anchor="w", padx=16, pady=12)
 
-        self.ctk.CTkLabel(container, text="HTML-шаблон").grid(row=3, column=0, sticky="w", padx=12, pady=8)
-        template_row = self.ctk.CTkFrame(container, fg_color="transparent")
-        template_row.grid(row=3, column=1, columnspan=2, sticky="ew", padx=12, pady=8)
+        # === ПУТИ И КОНФИГ (Раздел 1) ===
+        config_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
+        config_section.pack(fill="x", padx=16, pady=8)
+        self.ctk.CTkLabel(config_section, text="📋 Конфигурация", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 8))
+
+        self._add_path_row(config_section, 0, "Конфиг", self.config_var, self._select_config)
+        self._add_path_row(config_section, 1, "Получатели", self.recipients_var, self._select_recipients)
+        self._add_path_row(config_section, 2, "Шаблоны", self.templates_var, self._select_templates)
+
+        # === ШАБЛОН И ОПЦИИ (Раздел 2) ===
+        template_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
+        template_section.pack(fill="x", padx=16, pady=8)
+        self.ctk.CTkLabel(template_section, text="🎨 Шаблон & Опции", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 8))
+        
+        template_row = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        template_row.pack(fill="x", padx=12, pady=8)
         template_row.grid_columnconfigure(0, weight=1)
+        self.ctk.CTkLabel(template_row, text="Выбор шаблона:").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.template_combo = self.ctk.CTkComboBox(template_row, variable=self.template_var, values=[])
-        self.template_combo.grid(row=0, column=0, sticky="ew")
-        self.ctk.CTkButton(template_row, text="Обновить", width=120, command=self._refresh_templates).grid(
-            row=0,
-            column=1,
-            padx=(8, 0),
-        )
+        self.template_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.ctk.CTkButton(template_row, text="↻ Обновить", width=90, command=self._refresh_templates).grid(row=0, column=2)
 
-        self.ctk.CTkLabel(container, text="Задержка, сек").grid(row=4, column=0, sticky="w", padx=12, pady=8)
-        self.ctk.CTkEntry(container, textvariable=self.delay_var).grid(row=4, column=1, columnspan=2, sticky="ew", padx=12, pady=8)
+        # Сетка опций: delay, rate limit, retry
+        options_frame = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        options_frame.pack(fill="x", padx=12, pady=8)
+        for i in range(3):
+            options_frame.grid_columnconfigure(i, weight=1)
 
+        self.ctk.CTkLabel(options_frame, text="Задержка, сек").grid(row=0, column=0, sticky="w")
+        self.ctk.CTkEntry(options_frame, textvariable=self.delay_var, width=100).grid(row=1, column=0, sticky="ew", padx=(0, 8))
+
+        self.ctk.CTkLabel(options_frame, text="Rate limit (писем/мин)").grid(row=0, column=1, sticky="w")
+        self.ctk.CTkEntry(options_frame, textvariable=self.rate_limit_var, width=100).grid(row=1, column=1, sticky="ew", padx=(0, 8))
+
+        self.ctk.CTkLabel(options_frame, text="Retry попытки").grid(row=0, column=2, sticky="w")
+        retry_row = self.ctk.CTkFrame(options_frame, fg_color="transparent")
+        retry_row.grid(row=1, column=2, sticky="ew")
+        retry_row.grid_columnconfigure(0, weight=1)
+        self.ctk.CTkEntry(retry_row, textvariable=self.retry_attempts_var, width=50).grid(row=0, column=0, sticky="ew")
+        self.ctk.CTkLabel(retry_row, text="откат (сек):").grid(row=0, column=1, padx=(8, 4), sticky="w")
+        self.ctk.CTkEntry(retry_row, textvariable=self.retry_backoff_var, width=50).grid(row=0, column=2, sticky="ew")
+
+        # Чекбокс dry-run
+        check_frame = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        check_frame.pack(fill="x", padx=12, pady=8)
         self.ctk.CTkCheckBox(
-            container,
-            text="Dry-run без реальной отправки",
+            check_frame,
+            text="🔄 Dry-run (без реальной отправки)",
             variable=self.dry_run_var,
             onvalue=True,
             offvalue=False,
-        ).grid(row=5, column=0, columnspan=3, sticky="w", padx=12, pady=(8, 12))
+        ).pack(anchor="w")
 
-        buttons = self.ctk.CTkFrame(container, fg_color="transparent")
-        buttons.grid(row=6, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
-        for index in range(5):
-            buttons.grid_columnconfigure(index, weight=1)
+        # === ДЕЙСТВИЯ (Раздел 3) ===
+        actions_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
+        actions_section.pack(fill="x", padx=16, pady=8)
+        self.ctk.CTkLabel(actions_section, text="⚡ Действия", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 8))
+
+        buttons_frame = self.ctk.CTkFrame(actions_section, fg_color="transparent")
+        buttons_frame.pack(fill="x", padx=12, pady=8)
+        for i in range(6):
+            buttons_frame.grid_columnconfigure(i, weight=1)
+
         button_specs = [
-            ("Старт", self._start_send),
-            ("Очередь JSON", self._run_queue_dialog),
-            ("Экспорт JSON/CSV", self._export_queue_dialog),
-            ("Предпросмотр", self._preview_email),
-            ("Статистика", self._show_stats),
-            ("Визуальный редактор", self._open_visual_template_editor),
-            ("Редактор шаблона", self._open_template_editor),
-            ("Сохранить пресет", self._save_preset_dialog),
-            ("Загрузить пресет", self._load_preset_dialog),
+            ("▶️  Старт", self._start_send, 0),
+            ("📊 Статистика", self._show_stats, 1),
+            ("👁️ Предпросмотр", self._preview_email, 2),
+            ("✏️ Редактор", self._open_template_editor, 3),
+            ("🎨 Визуальный", self._open_visual_template_editor, 4),
+            ("💾 Пресет", self._save_preset_dialog, 5),
         ]
-        for index, (label, command) in enumerate(button_specs):
-            row = index // 5
-            column = index % 5
-            self.ctk.CTkButton(buttons, text=label, command=command).grid(
-                row=row,
-                column=column,
-                padx=4,
-                pady=4,
-                sticky="ew",
-            )
+        for label, command, col in button_specs:
+            self.ctk.CTkButton(
+                buttons_frame,
+                text=label,
+                command=command,
+                height=36,
+                font=("", 11),
+            ).grid(row=0, column=col, sticky="ew", padx=4)
 
-        self.ctk.CTkLabel(container, textvariable=self.status_var, anchor="w").grid(
-            row=7,
-            column=0,
-            columnspan=3,
-            sticky="ew",
-            padx=12,
-            pady=8,
-        )
+        # Дополнительные кнопки на второй строке
+        buttons_frame2 = self.ctk.CTkFrame(actions_section, fg_color="transparent")
+        buttons_frame2.pack(fill="x", padx=12, pady=(0, 8))
+        for i in range(3):
+            buttons_frame2.grid_columnconfigure(i, weight=1)
 
-        self.log_widget = self.ctk.CTkTextbox(container, wrap="word")
-        self.log_widget.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=12, pady=(0, 12))
+        button_specs2 = [
+            ("📂 Очередь JSON", self._run_queue_dialog, 0),
+            ("💾 Экспорт JSON/CSV", self._export_queue_dialog, 1),
+            ("📂 Загрузить пресет", self._load_preset_dialog, 2),
+        ]
+        for label, command, col in button_specs2:
+            self.ctk.CTkButton(
+                buttons_frame2,
+                text=label,
+                command=command,
+                height=32,
+                font=("", 10),
+                fg_color=("gray70", "gray30"),
+            ).grid(row=0, column=col, sticky="ew", padx=4)
+
+        # === СТАТУС (Раздел 4) ===
+        status_section = self.ctk.CTkFrame(main_container, fg_color=("gray88", "gray25"), corner_radius=12)
+        status_section.pack(fill="x", padx=16, pady=8)
+        self.ctk.CTkLabel(
+            status_section,
+            textvariable=self.status_var,
+            anchor="w",
+            font=("", 11),
+        ).pack(fill="x", padx=12, pady=12)
+
+        # === ЛОГ (Раздел 5) ===
+        log_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
+        log_section.pack(fill="both", expand=True, padx=16, pady=(8, 16))
+        self.ctk.CTkLabel(log_section, text="📝 Лог отправки", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 8))
+        
+        log_buttons = self.ctk.CTkFrame(log_section, fg_color="transparent")
+        log_buttons.pack(fill="x", padx=12, pady=(0, 8))
+        self.ctk.CTkButton(log_buttons, text="🗑️  Очистить лог", width=120, command=self._clear_log).pack(side="left")
+
+        self.log_widget = self.ctk.CTkTextbox(log_section, wrap="word", font=("Courier", 10))
+        self.log_widget.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
     def _add_path_row(self, parent: object, row: int, label: str, variable: object, command: object) -> None:
-        self.ctk.CTkLabel(parent, text=label).grid(row=row, column=0, sticky="w", padx=12, pady=8)
-        self.ctk.CTkEntry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", padx=12, pady=8)
-        self.ctk.CTkButton(parent, text="Выбрать", width=120, command=command).grid(
-            row=row,
-            column=2,
-            padx=12,
-            pady=8,
-        )
+        row_frame = self.ctk.CTkFrame(parent, fg_color="transparent")
+        row_frame.pack(fill="x", padx=12, pady=6)
+        row_frame.grid_columnconfigure(1, weight=1)
+
+        self.ctk.CTkLabel(row_frame, text=label + ":").grid(row=0, column=0, sticky="w", padx=(0, 8), width=80)
+        self.ctk.CTkEntry(row_frame, textvariable=variable).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.ctk.CTkButton(row_frame, text="📁", width=40, command=command).grid(row=0, column=2)
 
     def _select_config(self) -> None:
         path = filedialog.askopenfilename(
@@ -206,22 +275,22 @@ class ModernEmailAppGUI:
         if preflight.warnings:
             proceed = messagebox.askyesno(
                 "Email App Modern",
-                "Найдены предупреждения preflight:\n\n"
+                "⚠️ Найдены предупреждения preflight:\n\n"
                 + "\n".join(f"- {item}" for item in preflight.warnings)
                 + "\n\nПродолжить?",
             )
             if not proceed:
-                self.status_var.set("Отправка отменена")
+                self.status_var.set("⊘ Отправка отменена")
                 return
 
         if not self.dry_run_var.get():
-            proceed = messagebox.askyesno("Email App Modern", "Запустить боевую отправку?")
+            proceed = messagebox.askyesno("Email App Modern", "🔥 Запустить РЕАЛЬНУЮ отправку?")
             if not proceed:
-                self.status_var.set("Отправка отменена")
+                self.status_var.set("⊘ Отправка отменена")
                 return
 
-        self.status_var.set("Запуск...")
-        self._append_log("Старт задачи")
+        self.status_var.set("⏳ Запуск...")
+        self._append_log("▶ Старт задачи")
         self.worker = threading.Thread(target=self._run_worker, args=(delay,), daemon=True)
         self.worker.start()
 
@@ -269,6 +338,23 @@ class ModernEmailAppGUI:
 
     def _run_worker(self, delay: float) -> None:
         try:
+            # Load config to get and apply rate_limit and retry settings
+            config = load_config(self.base_dir / self.config_var.get())
+            
+            # Override rate limit if set in GUI
+            if self.rate_limit_var.get().strip():
+                try:
+                    config.delivery.rate_limit_per_minute = int(self.rate_limit_var.get().strip())
+                except ValueError:
+                    pass
+            
+            # Override retry settings if set in GUI
+            try:
+                config.delivery.retry_attempts = int(self.retry_attempts_var.get().strip() or "1")
+                config.delivery.retry_backoff_seconds = float(self.retry_backoff_var.get().strip() or "5")
+            except ValueError:
+                pass
+            
             summary = run_campaign(
                 base_dir=self.base_dir,
                 config_path=self.base_dir / self.config_var.get(),
@@ -284,7 +370,7 @@ class ModernEmailAppGUI:
             self.queue.put(
                 (
                     "done",
-                    f"Готово. Обработано: {summary.processed}/{summary.total}, успешно: {summary.successful}, ошибок: {summary.failed}",
+                    f"✓ Готово. Обработано: {summary.processed}/{summary.total}, успешно: {summary.successful}, ошибок: {summary.failed}",
                 )
             )
         except CampaignError as error:
@@ -623,11 +709,11 @@ class ModernEmailAppGUI:
             elif event == "done":
                 self._append_log(payload)
                 self.status_var.set(payload)
-                messagebox.showinfo("Email App Modern", payload)
+                messagebox.showinfo("✓ Результат", payload)
             elif event == "error":
-                self._append_log(f"Ошибка: {payload}")
-                self.status_var.set("Ошибка")
-                messagebox.showerror("Email App Modern", payload)
+                self._append_log(f"✗ Ошибка: {payload}")
+                self.status_var.set("✗ Ошибка")
+                messagebox.showerror("✗ Ошибка", payload)
 
         self.root.after(150, self._poll_queue)
 

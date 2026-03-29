@@ -20,6 +20,36 @@ from .renderer import TemplateRenderer
 from .smtp_client import SMTPMailer
 
 
+def _send_with_retry(
+    mailer,
+    recipient,
+    message_settings,
+    html_body,
+    attachment_paths,
+    inline_image_paths,
+    retry_attempts: int = 1,
+    retry_backoff_seconds: float = 5.0,
+) -> None:
+    """Send email with automatic retry on temporary failures."""
+    last_error = None
+    for attempt in range(retry_attempts):
+        try:
+            mailer.send(
+                recipient=recipient,
+                message_settings=message_settings,
+                html_body=html_body,
+                attachment_paths=attachment_paths,
+                inline_image_paths=inline_image_paths,
+            )
+            return
+        except Exception as error:
+            last_error = error
+            if attempt < retry_attempts - 1:
+                time.sleep(retry_backoff_seconds)
+    if last_error:
+        raise last_error
+
+
 class CampaignError(RuntimeError):
     """Raised when campaign data is invalid."""
 
@@ -367,6 +397,13 @@ def run_campaign(
     history_jsonl_path = _resolve_output_path(base_dir, config.delivery.history_jsonl)
     mailers = [SMTPMailer(settings) for settings in config.smtp_accounts]
     delay_seconds = config.delivery.delay_seconds if delay_override is None else max(delay_override, 0.0)
+    
+    # Rate limiting: calculate minimum delay between sends
+    min_delay_from_rate = 0.0
+    if config.delivery.rate_limit_per_minute and config.delivery.rate_limit_per_minute > 0:
+        min_delay_from_rate = 60.0 / config.delivery.rate_limit_per_minute
+    
+    final_delay = max(delay_seconds, min_delay_from_rate)
 
     successful = 0
     failed = 0
@@ -440,12 +477,15 @@ def run_campaign(
                 history_status = "dry-run"
                 history_error = ""
             else:
-                mailer.send(
+                _send_with_retry(
+                    mailer=mailer,
                     recipient=recipient,
                     message_settings=config.message,
                     html_body=html_body,
                     attachment_paths=attachment_paths,
                     inline_image_paths=inline_image_paths,
+                    retry_attempts=config.delivery.retry_attempts,
+                    retry_backoff_seconds=config.delivery.retry_backoff_seconds,
                 )
                 message = (
                     f"[OK] {index}/{len(recipients)} отправлено: {recipient.email} "
@@ -480,9 +520,9 @@ def run_campaign(
                 },
             )
 
-        if delay_seconds > 0 and index < len(recipients):
-            emit(f"Пауза {delay_seconds:.2f} сек.")
-            time.sleep(delay_seconds)
+        if final_delay > 0 and index < len(recipients):
+            emit(f"Пауза {final_delay:.2f} сек.")
+            time.sleep(final_delay)
 
     logger.info(
         "Завершено: processed=%s, successful=%s, failed=%s",
