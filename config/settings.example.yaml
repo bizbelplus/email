@@ -1,0 +1,35 @@
+smtp:
+  host: smtp.example.com
+  port: 587
+  username: your_login@example.com
+  password: CHANGE_ME
+  from_email: your_login@example.com
+  from_name: Example Sender
+  use_tls: true
+  use_ssl: false
+  timeout_seconds: 30
+  # Для нескольких аккаунтов можно вместо полей выше указать:
+  # accounts_file: config/smtp_accounts.example.csv
+
+message:
+  subject: "Пример HTML-письма"
+  template: newsletter.html
+  reply_to: support@example.com
+  attachments:
+    - files/example.txt
+  inline_images:
+    hero: files/example-inline.svg
+
+delivery:
+  delay_seconds: 0.5
+  log_file: logs/email_app.log
+  history_csv: history/email_history.csv
+  history_jsonl: history/email_history.jsonl
+
+content:
+  headline: "Добро пожаловать"
+  preheader: "Короткое описание письма"
+  body_intro: "Это пример безопасного SMTP-приложения на Python для легитимной рассылки opt-in писем."
+  body_text: "Вы можете менять тему, шаблон, inline-изображения и персональные поля через CSV и YAML-конфиг."
+  cta_label: "Открыть сайт"
+  cta_url: "https://example.com"

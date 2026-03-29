@@ -1,0 +1,6 @@
+config: config/settings.yaml
+recipients: recipients.csv
+templates: templates
+template: newsletter.html
+delay_seconds: 0.5
+dry_run: true

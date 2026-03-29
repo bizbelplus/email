@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ subject }}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;color:#111827;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f4f6;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,0.08);">
+            <tr>
+              <td style="background:linear-gradient(135deg,#2563eb,#7c3aed);padding:32px 40px;color:#ffffff;">
+                {% if inline_images.hero %}
+                <p style="margin:0 0 18px;">
+                  <img src="cid:{{ inline_images.hero.cid }}" alt="Hero" style="display:block;max-width:160px;height:auto;border:0;">
+                </p>
+                {% endif %}
+                <h1 style="margin:0 0 8px;font-size:28px;line-height:1.2;">{{ headline }}</h1>
+                <p style="margin:0;font-size:16px;line-height:1.6;opacity:0.92;">{{ preheader }}</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:40px;">
+                <p style="margin:0 0 18px;font-size:16px;line-height:1.7;">Здравствуйте{% if recipient.name %}, {{ recipient.name }}{% endif %}!</p>
+                <p style="margin:0 0 18px;font-size:16px;line-height:1.7;">{{ body_intro }}</p>
+                <p style="margin:0 0 24px;font-size:16px;line-height:1.7;">{{ body_text }}</p>
+                {% if cta_url and cta_label %}
+                <p style="margin:0 0 24px;">
+                  <a href="{{ cta_url }}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:14px 22px;border-radius:10px;font-weight:700;">{{ cta_label }}</a>
+                </p>
+                {% endif %}
+                <p style="margin:0;font-size:14px;line-height:1.7;color:#6b7280;">Если письмо пришло по ошибке, просто проигнорируйте его.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

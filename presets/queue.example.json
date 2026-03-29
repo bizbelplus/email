@@ -1,0 +1,18 @@
+[
+  {
+    "config": "config/settings.yaml",
+    "recipients": "recipients.csv",
+    "templates": "templates",
+    "template": "newsletter.html",
+    "delay_seconds": 0.2,
+    "dry_run": true
+  },
+  {
+    "config": "config/settings.yaml",
+    "recipients": "recipients.csv",
+    "templates": "templates",
+    "template": "newsletter.html",
+    "delay_seconds": 0.0,
+    "dry_run": true
+  }
+]

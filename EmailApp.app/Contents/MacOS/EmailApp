@@ -1,0 +1,23 @@
+#!/bin/zsh
+# macOS .app launcher для Email App
+# Структура: EmailApp.app/Contents/MacOS/EmailApp
+# Корень проекта — три уровня вверх
+
+PROJECT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$PROJECT"
+
+# Проверяем наличие виртуального окружения
+if [[ ! -f ".venv/bin/activate" ]]; then
+    osascript -e 'display alert "Виртуальное окружение не найдено" message "Запустите в терминале:\n\npython3.10 -m venv .venv\nsource .venv/bin/activate\npip install -r requirements.txt" as critical'
+    exit 1
+fi
+
+source .venv/bin/activate
+
+# Проверяем наличие конфига
+if [[ ! -f "config/settings.yaml" ]]; then
+    cp config/settings.example.yaml config/settings.yaml
+    osascript -e 'display alert "Конфиг создан" message "Файл config/settings.yaml создан из примера.\nЗаполните SMTP-данные перед отправкой." as warning'
+fi
+
+exec python -m email_app --modern-gui

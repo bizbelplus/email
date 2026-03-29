@@ -1,0 +1,3 @@
+host,port,username,password,from_email,from_name,use_tls,use_ssl,timeout_seconds
+smtp.example.com,587,mailer1@example.com,CHANGE_ME,mailer1@example.com,Mailer One,true,false,30
+smtp.example.com,587,mailer2@example.com,CHANGE_ME,mailer2@example.com,Mailer Two,true,false,30
