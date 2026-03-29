@@ -41,14 +41,14 @@ class ModernEmailAppGUI:
         self.preview_window = None
         self.preview_html_widget = None
         self.preview_source_text = None
-        
-        # Theme preference
-        self.theme_var = ctk.StringVar(value="dark")
 
         self.root = ctk.CTk()
         self.root.title("Email App – Modern SMTP Campaign Manager")
         self.root.geometry("1200x920")
         self.root.minsize(1000, 750)
+
+        # Theme preference
+        self.theme_var = ctk.StringVar(value="dark")
 
         self.config_var = ctk.StringVar(value="config/settings.yaml")
         self.recipients_var = ctk.StringVar(value="recipients.csv")
