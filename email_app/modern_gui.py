@@ -205,11 +205,13 @@ class ModernEmailAppGUI:
     def _add_path_row(self, parent: object, row: int, label: str, variable: object, command: object) -> None:
         row_frame = self.ctk.CTkFrame(parent, fg_color="transparent")
         row_frame.pack(fill="x", padx=12, pady=6)
+        row_frame.grid_columnconfigure(0, minsize=100)
         row_frame.grid_columnconfigure(1, weight=1)
+        row_frame.grid_columnconfigure(2, minsize=45)
 
-        self.ctk.CTkLabel(row_frame, text=label + ":").grid(row=0, column=0, sticky="w", padx=(0, 8), width=80)
+        self.ctk.CTkLabel(row_frame, text=label + ":").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.ctk.CTkEntry(row_frame, textvariable=variable).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-        self.ctk.CTkButton(row_frame, text="📁", width=40, command=command).grid(row=0, column=2)
+        self.ctk.CTkButton(row_frame, text="📁", command=command).grid(row=0, column=2)
 
     def _select_config(self) -> None:
         path = filedialog.askopenfilename(
