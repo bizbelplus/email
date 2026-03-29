@@ -1,0 +1,62 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build EXE (PyInstaller)
+        shell: cmd
+        run: |
+          pyinstaller ^
+            --onedir ^
+            --windowed ^
+            --name "Email App" ^
+            --add-data "templates;templates" ^
+            --add-data "config;config" ^
+            --add-data "files;files" ^
+            --add-data "presets;presets" ^
+            --add-data "recipients.csv;." ^
+            --collect-all customtkinter ^
+            --collect-all tkhtmlview ^
+            --collect-all PySide6 ^
+            --hidden-import "email_app.gui" ^
+            --hidden-import "email_app.modern_gui" ^
+            --hidden-import "email_app.desktop_rich_editor" ^
+            --hidden-import "email_app.tinymce_editor" ^
+            --hidden-import "email_app.service" ^
+            --hidden-import "email_app.smtp_client" ^
+            --hidden-import "email_app.config" ^
+            --hidden-import "email_app.models" ^
+            --hidden-import "email_app.recipients" ^
+            --hidden-import "email_app.renderer" ^
+            --hidden-import "email_app.presets" ^
+            --hidden-import "email_app.stats" ^
+            --hidden-import "email_app.campaign_queue" ^
+            email_app\__main__.py
+
+      - name: Archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Email-App-Windows
+          path: dist/Email App/
