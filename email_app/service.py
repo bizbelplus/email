@@ -4,13 +4,15 @@ import base64
 import csv
 import json
 import logging
+import re
 import time
 import webbrowser
 from dataclasses import dataclass
 import mimetypes
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 from .config import ConfigError, load_config
 from .recipients import RecipientsError, load_recipients
@@ -38,6 +40,112 @@ class PreviewSummary:
     preview_path: Path
     template_name: str
     recipient_email: str
+
+
+@dataclass(slots=True)
+class PreflightReport:
+    checks: list[str]
+    warnings: list[str]
+    errors: list[str]
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+def _extract_links(html_body: str) -> list[str]:
+    return [
+        match.group(1).strip()
+        for match in re.finditer(r'href\s*=\s*["\']([^"\']+)["\']', html_body, flags=re.IGNORECASE)
+    ]
+
+
+def _validate_rendered_template(html_body: str) -> tuple[list[str], list[str]]:
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    unresolved_vars = re.findall(r"\{\{\s*[^}]+\s*\}\}", html_body)
+    unresolved_blocks = re.findall(r"\{\%\s*[^%]+\s*\%\}", html_body)
+    if unresolved_blocks:
+        warnings.append("В HTML остались Jinja-блоки (возможно это ожидаемо): " + ", ".join(unresolved_blocks[:3]))
+    if unresolved_vars:
+        warnings.append("В HTML остались переменные Jinja: " + ", ".join(unresolved_vars[:3]))
+
+    links = _extract_links(html_body)
+    for link in links:
+        parsed = urlparse(link)
+        if link.startswith(("#", "cid:")):
+            continue
+        if parsed.scheme in {"http", "https", "mailto", "tel"}:
+            continue
+        warnings.append(f"Ссылка может быть некорректной: {link}")
+
+    if "<html" not in html_body.lower() or "<body" not in html_body.lower():
+        warnings.append("Шаблон не содержит полные теги <html>/<body>")
+
+    return warnings, errors
+
+
+def run_preflight(
+    *,
+    base_dir: Path,
+    config_path: Path,
+    recipients_path: Path,
+    templates_path: Path,
+    template_override: str | None = None,
+) -> PreflightReport:
+    checks: list[str] = []
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    try:
+        config = load_config(config_path)
+        checks.append(f"Конфиг загружен: {config_path}")
+    except ConfigError as error:
+        return PreflightReport(checks=checks, warnings=warnings, errors=[str(error)])
+
+    try:
+        recipients = load_recipients(recipients_path)
+        checks.append(f"Получатели загружены: {len(recipients)}")
+    except RecipientsError as error:
+        return PreflightReport(checks=checks, warnings=warnings, errors=[str(error)])
+
+    template_name = template_override or config.message.template
+    renderer = TemplateRenderer(templates_path)
+    available_templates = renderer.list_templates()
+    if template_name not in available_templates:
+        errors.append(f"Шаблон не найден: {template_name}")
+        return PreflightReport(checks=checks, warnings=warnings, errors=errors)
+    checks.append(f"Шаблон найден: {template_name}")
+
+    try:
+        attachment_paths = _resolve_attachment_paths(base_dir, config.message.attachments)
+        inline_image_paths = _resolve_inline_image_paths(base_dir, config.message.inline_images)
+    except CampaignError as error:
+        errors.append(str(error))
+        return PreflightReport(checks=checks, warnings=warnings, errors=errors)
+
+    checks.append(f"Вложений: {len(attachment_paths)}")
+    checks.append(f"Inline-изображений: {len(inline_image_paths)}")
+    checks.append(f"SMTP-аккаунтов: {len(config.smtp_accounts)}")
+
+    first_recipient = recipients[0]
+    rendered = renderer.render(
+        template_name=template_name,
+        recipient=first_recipient,
+        context={
+            **config.content,
+            "subject": config.message.subject,
+            "inline_images": _build_inline_context(inline_image_paths),
+        },
+    )
+    checks.append(f"Рендер тестового письма: {first_recipient.email}")
+
+    template_warnings, template_errors = _validate_rendered_template(rendered)
+    warnings.extend(template_warnings)
+    errors.extend(template_errors)
+
+    return PreflightReport(checks=checks, warnings=warnings, errors=errors)
 
 
 def _create_logger(base_dir: Path, log_file: str) -> tuple[logging.Logger, Path]:
@@ -131,6 +239,48 @@ def _inject_preview_inline_images(html_body: str, inline_image_paths: dict[str, 
     return preview_html
 
 
+def _build_dedupe_sent_set(
+    *,
+    history_csv_path: Path,
+    template_name: str,
+    dedupe_template_scope: bool,
+    dedupe_history_days: int,
+) -> set[str]:
+    if not history_csv_path.exists():
+        return set()
+
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(days=max(dedupe_history_days, 0))
+    sent: set[str] = set()
+
+    with history_csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if (row.get("status") or "").strip().lower() != "sent":
+                continue
+            recipient = (row.get("recipient") or "").strip().lower()
+            if not recipient:
+                continue
+            row_template = (row.get("template") or "").strip()
+            if dedupe_template_scope and row_template != template_name:
+                continue
+
+            timestamp_raw = (row.get("timestamp") or "").strip()
+            if timestamp_raw:
+                try:
+                    row_dt = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
+                    if row_dt.tzinfo is None:
+                        row_dt = row_dt.replace(tzinfo=timezone.utc)
+                    if dedupe_history_days > 0 and row_dt < cutoff:
+                        continue
+                except ValueError:
+                    pass
+
+            sent.add(recipient)
+
+    return sent
+
+
 def render_preview(
     *,
     base_dir: Path,
@@ -194,6 +344,16 @@ def run_campaign(
     except (ConfigError, RecipientsError) as error:
         raise CampaignError(str(error)) from error
 
+    preflight = run_preflight(
+        base_dir=base_dir,
+        config_path=config_path,
+        recipients_path=recipients_path,
+        templates_path=templates_path,
+        template_override=template_override,
+    )
+    if preflight.errors:
+        raise CampaignError("; ".join(preflight.errors))
+
     renderer = TemplateRenderer(templates_path)
     available_templates = renderer.list_templates()
     template_name = template_override or config.message.template
@@ -211,19 +371,28 @@ def run_campaign(
     successful = 0
     failed = 0
     processed = 0
+    dedupe_sent_set: set[str] = set()
+    if config.delivery.skip_previously_sent:
+        dedupe_sent_set = _build_dedupe_sent_set(
+            history_csv_path=history_csv_path,
+            template_name=template_name,
+            dedupe_template_scope=config.delivery.dedupe_template_scope,
+            dedupe_history_days=config.delivery.dedupe_history_days,
+        )
 
     def emit(message: str) -> None:
         if progress_callback is not None:
             progress_callback(message)
 
     logger.info(
-        "Старт кампании: dry_run=%s, recipients=%s, template=%s, attachments=%s, inline_images=%s, smtp_accounts=%s",
+        "Старт кампании: dry_run=%s, recipients=%s, template=%s, attachments=%s, inline_images=%s, smtp_accounts=%s, dedupe=%s",
         dry_run,
         len(recipients),
         template_name,
         len(attachment_paths),
         len(inline_image_paths),
         len(mailers),
+        config.delivery.skip_previously_sent,
     )
     emit(f"Лог: {log_path}")
     emit(f"История CSV: {history_csv_path}")
@@ -232,6 +401,28 @@ def run_campaign(
     for index, recipient in enumerate(recipients, start=1):
         mailer = mailers[(index - 1) % len(mailers)]
         smtp_account = mailer.settings.from_email
+        recipient_key = recipient.email.strip().lower()
+
+        if config.delivery.skip_previously_sent and recipient_key in dedupe_sent_set:
+            message = f"[SKIP] {index}/{len(recipients)} дубликат: {recipient.email}"
+            logger.info(message)
+            emit(message)
+            processed += 1
+            _append_history(
+                csv_path=history_csv_path,
+                jsonl_path=history_jsonl_path,
+                record={
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "recipient": recipient.email,
+                    "status": "skipped-duplicate",
+                    "template": template_name,
+                    "smtp_account": smtp_account,
+                    "dry_run": str(dry_run).lower(),
+                    "error": "already_sent",
+                },
+            )
+            continue
+
         html_body = renderer.render(
             template_name=template_name,
             recipient=recipient,
@@ -263,6 +454,7 @@ def run_campaign(
                 successful += 1
                 history_status = "sent"
                 history_error = ""
+                dedupe_sent_set.add(recipient_key)
             logger.info(message)
             emit(message)
         except Exception as error:  # noqa: BLE001

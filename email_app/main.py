@@ -7,7 +7,7 @@ from .campaign_queue import CampaignQueueError, load_campaign_queue, run_campaig
 from .gui import launch_gui
 from .modern_gui import launch_modern_gui
 from .presets import CampaignPreset, PresetError, load_preset, save_preset
-from .service import CampaignError, render_preview, run_campaign
+from .service import CampaignError, render_preview, run_campaign, run_preflight
 from .stats import StatsError, filter_history_records, load_history_records, summarize_history_records
 
 
@@ -60,6 +60,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--preview",
         action="store_true",
         help="Сгенерировать HTML-предпросмотр по первому получателю и открыть в браузере",
+    )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Проверить кампанию перед запуском и вывести чеклист",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Запускать боевую отправку без интерактивного подтверждения",
     )
     parser.add_argument(
         "--preset",
@@ -219,6 +229,33 @@ def main() -> int:
                 f"шаблон: {preview.template_name} | получатель: {preview.recipient_email}"
             )
             return 0
+
+        preflight = run_preflight(
+            base_dir=base_dir,
+            config_path=base_dir / args.config,
+            recipients_path=base_dir / args.recipients,
+            templates_path=base_dir / args.templates,
+            template_override=args.template,
+        )
+        print("Чеклист:")
+        for item in preflight.checks:
+            print(f"  - OK: {item}")
+        for item in preflight.warnings:
+            print(f"  - WARN: {item}")
+        for item in preflight.errors:
+            print(f"  - ERROR: {item}")
+
+        if preflight.errors:
+            return 1
+
+        if args.preflight:
+            return 0
+
+        if not args.dry_run and not args.yes:
+            answer = input("Продолжить боевую отправку? Введите 'yes': ").strip().lower()
+            if answer != "yes":
+                print("Отправка отменена")
+                return 1
 
         summary = run_campaign(
             base_dir=base_dir,

@@ -32,6 +32,9 @@ class DeliverySettings:
     log_file: str = "logs/email_app.log"
     history_csv: str = "history/email_history.csv"
     history_jsonl: str = "history/email_history.jsonl"
+    skip_previously_sent: bool = False
+    dedupe_template_scope: bool = True
+    dedupe_history_days: int = 30
 
 
 @dataclass(slots=True)

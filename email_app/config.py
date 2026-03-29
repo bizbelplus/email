@@ -93,6 +93,9 @@ def load_config(config_path: str | Path) -> AppConfig:
         log_file=str(delivery_raw.get("log_file", "logs/email_app.log")),
         history_csv=str(delivery_raw.get("history_csv", "history/email_history.csv")),
         history_jsonl=str(delivery_raw.get("history_jsonl", "history/email_history.jsonl")),
+        skip_previously_sent=bool(delivery_raw.get("skip_previously_sent", False)),
+        dedupe_template_scope=bool(delivery_raw.get("dedupe_template_scope", True)),
+        dedupe_history_days=int(delivery_raw.get("dedupe_history_days", 30)),
     )
 
     if not isinstance(content_raw, dict):

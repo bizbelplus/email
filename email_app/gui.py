@@ -18,7 +18,7 @@ from .campaign_queue import (
 )
 from .config import ConfigError, load_config
 from .presets import CampaignPreset, PresetError, load_preset, save_preset
-from .service import CampaignError, render_preview, run_campaign
+from .service import CampaignError, render_preview, run_campaign, run_preflight
 from .renderer import TemplateRenderer
 from .stats import (
     StatsError,
@@ -194,6 +194,39 @@ class EmailAppGUI:
         except ValueError:
             messagebox.showerror("Email App", "Задержка должна быть числом")
             return
+
+        try:
+            preflight = run_preflight(
+                base_dir=self.base_dir,
+                config_path=self.base_dir / self.config_var.get(),
+                recipients_path=self.base_dir / self.recipients_var.get(),
+                templates_path=self.base_dir / self.templates_var.get(),
+                template_override=self.template_var.get() or None,
+            )
+        except CampaignError as error:
+            messagebox.showerror("Email App", str(error))
+            return
+
+        if preflight.errors:
+            messagebox.showerror("Email App", "\n".join(preflight.errors))
+            return
+
+        if preflight.warnings:
+            proceed = messagebox.askyesno(
+                "Email App",
+                "Найдены предупреждения preflight:\n\n"
+                + "\n".join(f"- {item}" for item in preflight.warnings)
+                + "\n\nПродолжить?",
+            )
+            if not proceed:
+                self.status_var.set("Отправка отменена")
+                return
+
+        if not self.dry_run_var.get():
+            proceed = messagebox.askyesno("Email App", "Запустить боевую отправку?")
+            if not proceed:
+                self.status_var.set("Отправка отменена")
+                return
 
         self.status_var.set("Запуск...")
         self._append_log("Старт задачи")

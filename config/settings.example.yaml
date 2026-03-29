@@ -25,6 +25,9 @@ delivery:
   log_file: logs/email_app.log
   history_csv: history/email_history.csv
   history_jsonl: history/email_history.jsonl
+  skip_previously_sent: false
+  dedupe_template_scope: true
+  dedupe_history_days: 30
 
 content:
   headline: "Добро пожаловать"
