@@ -1,45 +1,91 @@
 smtp:
-  host: smtp.example.com
-  port: 587
-  username: your_login@example.com
-  password: CHANGE_ME
-  from_email: your_login@example.com
-  from_name: Example Sender
-  use_tls: true
-  use_ssl: false
-  timeout_seconds: 30
-  # Для нескольких аккаунтов можно вместо полей выше указать:
-  # accounts_file: config/smtp_accounts.example.csv
+  host: smtp.example.com           # SMTP-сервер
+  port: 587                        # Порт (587 для TLS, 465 для SSL)
+  username: your_login@example.com # Логин SMTP
+  password: CHANGE_ME              # Пароль SMTP (или App Password)
+  from_email: your_login@example.com # Отправитель (email)
+  from_name: Example Sender        # Имя отправителя
+  use_tls: true                    # Включить TLS (рекомендуется)
+  use_ssl: false                   # Включить SSL (обычно false, если use_tls true)
+  timeout_seconds: 30              # Таймаут соединения (сек)
+  # --- Прокси (опционально) ---
+  # Примеры ваших прокси:
+  # proxy_host: 185.252.215.173
+  # proxy_port: 24091
+  # proxy_type: socks5
+  # proxy_user: 111111
+  # proxy_pass: 111111
+  #
+  # proxy_host: 185.252.215.173
+  # proxy_port: 40238
+  # proxy_type: socks5
+  # proxy_user: 111111
+  # proxy_pass: 111111
+  #
+  # proxy_host: 185.252.215.173
+  # proxy_port: 39878
+  # proxy_type: socks5
+  # proxy_user: 111111
+  # proxy_pass: 111111
+  #
+  # proxy_host: 185.252.215.173
+  # proxy_port: 30808
+  # proxy_type: socks5
+  # proxy_user: 111111
+  # proxy_pass: 111111
+  #
+  # proxy_host: 185.252.215.173
+  # proxy_port: 33674
+  # proxy_type: socks5
+  # proxy_user: 111111
+  # proxy_pass: 111111
+  #
+  # proxy_host: 185.252.215.173
+  # proxy_port: 39117
+  # proxy_type: socks5
+  # proxy_user: 111111
+  # proxy_pass: 111111
+  # --- Пул SMTP-аккаунтов (ротация) ---
+  # accounts_file: config/smtp_accounts.example.csv # CSV-файл с пулом SMTP
 
 message:
-  subject: "Пример HTML-письма"
-  template: newsletter.html
-  reply_to: support@example.com
-  attachments:
+  subject: "Пример HTML-письма"    # Тема письма (можно использовать Jinja2-переменные)
+  template: newsletter.html        # HTML-шаблон (Jinja2)
+  reply_to: support@example.com    # Email для ответа (Reply-To)
+  attachments:                     # Список файлов-вложений
     - files/example.txt
-  inline_images:
+  random_attachments_folder: "" # Папка для случайных вложений (картинок), например files/random-images
+  attachments:                     # Список файлов-вложений
+    - files/example.txt
+  inline_images:                   # Inline-изображения (cid:)
     hero: files/example-inline.svg
 
 delivery:
-  delay_seconds: 0.5
-  log_file: logs/email_app.log
-  history_csv: history/email_history.csv
-  history_jsonl: history/email_history.jsonl
-  skip_previously_sent: false
-  dedupe_template_scope: true
-  dedupe_history_days: 30
-  # Планировщик отправок (ISO 8601, e.g. "2025-03-30T10:00:00", или null для немедленно)
-  scheduled_time: null
-  # Rate limiting: макс писем в минуту (null = без ограничений)
-  rate_limit_per_minute: null
-  # Автоматический retry при временных ошибках
-  retry_attempts: 1
-  retry_backoff_seconds: 5.0
+  delay_seconds: 0.5               # Задержка между письмами (сек)
+  log_file: logs/email_app.log     # Путь к лог-файлу
+  history_csv: history/email_history.csv # История отправок (CSV)
+  history_jsonl: history/email_history.jsonl # История отправок (JSONL)
+  skip_previously_sent: false      # Пропускать ранее отправленные адреса (антидубли)
+  dedupe_template_scope: true      # Учитывать шаблон при антидубле
+  dedupe_history_days: 30          # Сколько дней хранить историю для антидубля
+  # --- Планирование и лимиты ---
+  scheduled_time: null             # ISO 8601, например "2026-03-30T10:00:00" или null
+  rate_limit_per_minute: null      # Ограничение писем в минуту (null = без ограничений)
+  parallel_smtp_accounts: 1        # Количество параллельных SMTP-потоков (например 5)
+  batch_interval_seconds: 0.0      # Пауза между партиями при параллельной отправке (секунды)
+  # Можно добавить:
+  # rate_limit_per_hour: null      # Ограничение писем в час
+  # rate_limit_per_day: null       # Ограничение писем в сутки
+  # --- Повторные попытки ---
+  retry_attempts: 1                # Кол-во попыток при ошибке
+  retry_backoff_seconds: 5.0       # Задержка между попытками (сек)
 
 content:
-  headline: "Добро пожаловать"
-  preheader: "Короткое описание письма"
+  headline: "Добро пожаловать"     # Заголовок письма (можно использовать переменные)
+  preheader: "Короткое описание письма" # Краткое описание (preview)
   body_intro: "Это пример безопасного SMTP-приложения на Python для легитимной рассылки opt-in писем."
   body_text: "Вы можете менять тему, шаблон, inline-изображения и персональные поля через CSV и YAML-конфиг."
   cta_label: "Открыть сайт"
   cta_url: "https://example.com"
+  sender_name: "Команда поддержки"  # Имя отправителя для подписи в шаблоне
+  unsubscribe_url: "https://example.com/unsubscribe"  # Ссылка для отписки (optional)

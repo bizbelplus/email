@@ -4,9 +4,12 @@ import base64
 import csv
 import json
 import logging
+import random
 import re
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import deepcopy
 from dataclasses import dataclass
 import mimetypes
 from datetime import datetime, timedelta, timezone
@@ -15,10 +18,12 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from .config import ConfigError, load_config
+from .models import MessageSettings, Recipient
 from .recipients import RecipientsError, load_recipients
 from .renderer import TemplateRenderer
 from .smtp_client import SMTPMailer
 from .validators import validate_csv_recipients
+from .proxy_utils import load_proxies, pick_random_proxy
 
 
 def _send_with_retry(
@@ -164,9 +169,19 @@ def run_preflight(
     try:
         attachment_paths = _resolve_attachment_paths(base_dir, config.message.attachments)
         inline_image_paths = _resolve_inline_image_paths(base_dir, config.message.inline_images)
+        _ = _collect_random_attachment_files(base_dir, config.message.random_attachments_folder)
     except CampaignError as error:
         errors.append(str(error))
         return PreflightReport(checks=checks, warnings=warnings, errors=errors)
+
+    random_attachments = []
+    if config.message.random_attachments_folder:
+        try:
+            random_attachments = _collect_random_attachment_files(base_dir, config.message.random_attachments_folder)
+            checks.append(f"Случайных вложений в папке: {len(random_attachments)} ({config.message.random_attachments_folder})")
+        except CampaignError as error:
+            errors.append(str(error))
+            return PreflightReport(checks=checks, warnings=warnings, errors=errors)
 
     checks.append(f"Вложений: {len(attachment_paths)}")
     checks.append(f"Inline-изображений: {len(inline_image_paths)}")
@@ -215,6 +230,17 @@ def _resolve_output_path(base_dir: Path, relative_path: str) -> Path:
     return output_path
 
 
+def _copy_message_settings(message: MessageSettings, reply_to: str | None) -> MessageSettings:
+    return MessageSettings(
+        subject=message.subject,
+        template=message.template,
+        reply_to=reply_to,
+        attachments=list(message.attachments),
+        random_attachments_folder=message.random_attachments_folder,
+        inline_images=dict(message.inline_images),
+    )
+
+
 def _append_history(
     *,
     csv_path: Path,
@@ -227,6 +253,8 @@ def _append_history(
         "status",
         "template",
         "smtp_account",
+        "proxy",
+        "reply_to",
         "dry_run",
         "error",
     ]
@@ -260,6 +288,34 @@ def _resolve_inline_image_paths(base_dir: Path, inline_images: dict[str, str]) -
             raise CampaignError(f"Не найдено inline-изображение '{cid}': {candidate}")
         resolved[cid] = candidate
     return resolved
+
+
+def _load_reply_to_list(base_dir: Path) -> list[str]:
+    candidate = base_dir / "config" / "replyto_emails.txt"
+    if not candidate.exists():
+        return []
+    emails: list[str] = []
+    with candidate.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            email = line.strip()
+            if email and "@" in email:
+                emails.append(email)
+    return emails
+
+
+def _collect_random_attachment_files(base_dir: Path, folder_path: str | None) -> list[Path]:
+    if not folder_path:
+        return []
+
+    folder = (base_dir / folder_path).resolve()
+    if not folder.exists() or not folder.is_dir():
+        raise CampaignError(f"Папка случайных вложений не найдена или не папка: {folder}")
+
+    allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg"}
+    files = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in allowed_ext]
+    if not files:
+        raise CampaignError(f"В папке случайных вложений нет подходящих файлов: {folder}")
+    return files
 
 
 def _build_inline_context(inline_image_paths: dict[str, Path]) -> dict[str, dict[str, str]]:
@@ -331,6 +387,7 @@ def render_preview(
     recipients_path: Path,
     templates_path: Path,
     template_override: str | None = None,
+    recipient_email: str | None = None,
     preview_path: Path | None = None,
     open_in_browser: bool = False,
 ) -> PreviewSummary:
@@ -347,7 +404,14 @@ def render_preview(
         raise CampaignError(f"Шаблон не найден: {template_name}")
 
     inline_image_paths = _resolve_inline_image_paths(base_dir, config.message.inline_images)
-    recipient = recipients[0]
+    if recipient_email:
+        recipient_candidates = [r for r in recipients if r.email.lower() == recipient_email.lower()]
+        if not recipient_candidates:
+            raise CampaignError(f"Recipient не найден: {recipient_email}")
+        recipient = recipient_candidates[0]
+    else:
+        recipient = recipients[0]
+
     html_body = renderer.render(
         template_name=template_name,
         recipient=recipient,
@@ -378,7 +442,15 @@ def run_campaign(
     templates_path: Path,
     dry_run: bool = False,
     template_override: str | None = None,
+    random_attachments_folder_override: str | None = None,
+    use_proxy: bool = True,
     delay_override: float | None = None,
+    rate_limit_per_minute: int | None = None,
+    retry_attempts: int | None = None,
+    retry_backoff_seconds: float | None = None,
+    parallel_smtp_enabled: bool | None = None,
+    parallel_smtp_accounts: int | None = None,
+    batch_interval_seconds: float | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> CampaignSummary:
     try:
@@ -386,6 +458,23 @@ def run_campaign(
         recipients = load_recipients(recipients_path)
     except (ConfigError, RecipientsError) as error:
         raise CampaignError(str(error)) from error
+
+    if rate_limit_per_minute is not None:
+        config.delivery.rate_limit_per_minute = max(0, int(rate_limit_per_minute))
+    if retry_attempts is not None:
+        config.delivery.retry_attempts = max(1, int(retry_attempts))
+    if retry_backoff_seconds is not None:
+        config.delivery.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+
+    if parallel_smtp_enabled is not None:
+        config.delivery.parallel_smtp_enabled = bool(parallel_smtp_enabled)
+    if parallel_smtp_accounts is not None:
+        config.delivery.parallel_smtp_accounts = max(1, int(parallel_smtp_accounts))
+    if batch_interval_seconds is not None:
+        config.delivery.batch_interval_seconds = max(0.0, float(batch_interval_seconds))
+
+    if random_attachments_folder_override:
+        config.message.random_attachments_folder = random_attachments_folder_override
 
     preflight = run_preflight(
         base_dir=base_dir,
@@ -405,10 +494,22 @@ def run_campaign(
 
     attachment_paths = _resolve_attachment_paths(base_dir, config.message.attachments)
     inline_image_paths = _resolve_inline_image_paths(base_dir, config.message.inline_images)
+    random_attachment_files = []
+    if config.message.random_attachments_folder:
+        random_attachment_files = _collect_random_attachment_files(base_dir, config.message.random_attachments_folder)
     logger, log_path = _create_logger(base_dir, config.delivery.log_file)
     history_csv_path = _resolve_output_path(base_dir, config.delivery.history_csv)
     history_jsonl_path = _resolve_output_path(base_dir, config.delivery.history_jsonl)
     mailers = [SMTPMailer(settings) for settings in config.smtp_accounts]
+    # --- Загрузка списка прокси ---
+    proxy_file = base_dir / "config" / "proxies.txt"
+    proxies = load_proxies(proxy_file) if proxy_file.exists() else []
+
+    # --- Reply-To list ---
+    reply_to_candidates = _load_reply_to_list(base_dir)
+    if not reply_to_candidates and config.message.reply_to:
+        reply_to_candidates = [config.message.reply_to]
+
     delay_seconds = config.delivery.delay_seconds if delay_override is None else max(delay_override, 0.0)
     
     # Rate limiting: calculate minimum delay between sends
@@ -434,6 +535,92 @@ def run_campaign(
         if progress_callback is not None:
             progress_callback(message)
 
+    def _send_task(recipient_index: int, recipient: Recipient, mailer_settings, proxy_list, reply_to_candidates):
+        nonlocal successful, failed, processed
+        local_mailer = SMTPMailer(deepcopy(mailer_settings))
+
+        proxy_info = "none"
+        if use_proxy and proxy_list:
+            proxy = pick_random_proxy(proxy_list)
+            local_mailer.settings.proxy_host = proxy.get("proxy_host")
+            local_mailer.settings.proxy_port = proxy.get("proxy_port")
+            local_mailer.settings.proxy_type = proxy.get("proxy_type")
+            local_mailer.settings.proxy_user = proxy.get("proxy_user")
+            local_mailer.settings.proxy_pass = proxy.get("proxy_pass")
+            proxy_info = f"{local_mailer.settings.proxy_type}:{local_mailer.settings.proxy_host}:{local_mailer.settings.proxy_port}"
+        else:
+            local_mailer.settings.proxy_host = None
+            local_mailer.settings.proxy_port = None
+            local_mailer.settings.proxy_type = None
+            local_mailer.settings.proxy_user = None
+            local_mailer.settings.proxy_pass = None
+
+        selected_reply_to = random.choice(reply_to_candidates) if reply_to_candidates else config.message.reply_to
+        message_settings = _copy_message_settings(config.message, selected_reply_to)
+
+        smtp_account = local_mailer.settings.from_email
+        recipient_key = recipient.email.strip().lower()
+
+        html_body = renderer.render(
+            template_name=template_name,
+            recipient=recipient,
+            context={
+                **config.content,
+                "subject": config.message.subject,
+                "inline_images": _build_inline_context(inline_image_paths),
+            },
+        )
+
+        recipient_attachment_paths = list(attachment_paths)
+        if random_attachment_files:
+            recipient_attachment_paths.append(random.choice(random_attachment_files))
+
+        if dry_run:
+            message = f"[DRY-RUN] {recipient_index}/{len(recipients)} подготовлено для {recipient.email} (smtp={smtp_account}, proxy={proxy_info})"
+            status = "dry-run"
+            error_msg = ""
+            success_delta = 1
+            fail_delta = 0
+            sent = False
+        else:
+            try:
+                _send_with_retry(
+                    mailer=local_mailer,
+                    recipient=recipient,
+                    message_settings=message_settings,
+                    html_body=html_body,
+                    attachment_paths=recipient_attachment_paths,
+                    inline_image_paths=inline_image_paths,
+                    retry_attempts=config.delivery.retry_attempts,
+                    retry_backoff_seconds=config.delivery.retry_backoff_seconds,
+                )
+                message = f"[OK] {recipient_index}/{len(recipients)} отправлено: {recipient.email} через {smtp_account} proxy={proxy_info}"
+                status = "sent"
+                error_msg = ""
+                success_delta = 1
+                fail_delta = 0
+                sent = True
+            except Exception as error:
+                message = f"[ERROR] {recipient_index}/{len(recipients)} {recipient.email}: {error}"
+                status = "error"
+                error_msg = str(error)
+                success_delta = 0
+                fail_delta = 1
+                sent = False
+
+        return {
+            "message": message,
+            "status": status,
+            "error_msg": error_msg,
+            "success_delta": success_delta,
+            "fail_delta": fail_delta,
+            "recipient": recipient.email,
+            "smtp_account": smtp_account,
+            "proxy": proxy_info,
+            "reply_to": selected_reply_to or "",
+            "dry_run": str(dry_run).lower(),
+        }
+
     logger.info(
         "Старт кампании: dry_run=%s, recipients=%s, template=%s, attachments=%s, inline_images=%s, smtp_accounts=%s, dedupe=%s",
         dry_run,
@@ -448,11 +635,9 @@ def run_campaign(
     emit(f"История CSV: {history_csv_path}")
     emit(f"История JSONL: {history_jsonl_path}")
 
+    target_recipients = []
     for index, recipient in enumerate(recipients, start=1):
-        mailer = mailers[(index - 1) % len(mailers)]
-        smtp_account = mailer.settings.from_email
         recipient_key = recipient.email.strip().lower()
-
         if config.delivery.skip_previously_sent and recipient_key in dedupe_sent_set:
             message = f"[SKIP] {index}/{len(recipients)} дубликат: {recipient.email}"
             logger.info(message)
@@ -466,82 +651,98 @@ def run_campaign(
                     "recipient": recipient.email,
                     "status": "skipped-duplicate",
                     "template": template_name,
-                    "smtp_account": smtp_account,
+                    "smtp_account": "",
+                    "proxy": "disabled" if not use_proxy else "n/a",
+                    "reply_to": config.message.reply_to or "",
                     "dry_run": str(dry_run).lower(),
                     "error": "already_sent",
                 },
             )
             continue
+        target_recipients.append((index, recipient))
 
-        html_body = renderer.render(
-            template_name=template_name,
-            recipient=recipient,
-            context={
-                **config.content,
-                "subject": config.message.subject,
-                "inline_images": _build_inline_context(inline_image_paths),
-            },
-        )
+    use_parallel = config.delivery.parallel_smtp_enabled or (config.delivery.parallel_smtp_accounts > 1 and len(mailers) > 1)
+    if use_parallel:
+        batch_size = min(config.delivery.parallel_smtp_accounts, len(mailers)) if len(mailers) > 0 else 1
+        batch_interval = max(0.0, config.delivery.batch_interval_seconds)
 
-        try:
-            if dry_run:
-                message = f"[DRY-RUN] {index}/{len(recipients)} подготовлено для {recipient.email}"
-                successful += 1
-                history_status = "dry-run"
-                history_error = ""
-            else:
-                _send_with_retry(
-                    mailer=mailer,
-                    recipient=recipient,
-                    message_settings=config.message,
-                    html_body=html_body,
-                    attachment_paths=attachment_paths,
-                    inline_image_paths=inline_image_paths,
-                    retry_attempts=config.delivery.retry_attempts,
-                    retry_backoff_seconds=config.delivery.retry_backoff_seconds,
-                )
-                message = (
-                    f"[OK] {index}/{len(recipients)} отправлено: {recipient.email} "
-                    f"через {smtp_account}"
-                )
-                successful += 1
-                history_status = "sent"
-                history_error = ""
-                dedupe_sent_set.add(recipient_key)
-            logger.info(message)
-            emit(message)
-        except Exception as error:  # noqa: BLE001
-            failed += 1
-            message = f"[ERROR] {index}/{len(recipients)} {recipient.email}: {error}"
-            logger.exception(message)
-            emit(message)
-            history_status = "error"
-            history_error = str(error)
-        finally:
+        for batch_start in range(0, len(target_recipients), batch_size):
+            batch = target_recipients[batch_start : batch_start + batch_size]
+            futures = {}
+            with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                for offset, (index, recipient) in enumerate(batch):
+                    mailer_settings = deepcopy(config.smtp_accounts[(batch_start + offset) % len(config.smtp_accounts)])
+                    futures[executor.submit(_send_task, index, recipient, mailer_settings, proxies, reply_to_candidates)] = (index, recipient)
+
+                for future in as_completed(futures):
+                    result = future.result()
+                    successful += result["success_delta"]
+                    failed += result["fail_delta"]
+                    processed += 1
+                    logger.info(result["message"])
+                    emit(result["message"])
+                    _append_history(
+                        csv_path=history_csv_path,
+                        jsonl_path=history_jsonl_path,
+                        record={
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "recipient": result["recipient"],
+                            "status": result["status"],
+                            "template": template_name,
+                            "smtp_account": result["smtp_account"],
+                            "proxy": result["proxy"],
+                            "reply_to": result["reply_to"],
+                            "dry_run": result["dry_run"],
+                            "error": result["error_msg"],
+                        },
+                    )
+
+            if batch_interval > 0 and batch_start + batch_size < len(target_recipients):
+                emit(f"Пауза {batch_interval:.2f} сек.")
+                time.sleep(batch_interval)
+    else:
+        for index, recipient in target_recipients:
+            mailer_settings = deepcopy(config.smtp_accounts[(index - 1) % len(config.smtp_accounts)])
+            result = _send_task(index, recipient, mailer_settings, proxies, reply_to_candidates)
+            successful += result["success_delta"]
+            failed += result["fail_delta"]
             processed += 1
+            logger.info(result["message"])
+            emit(result["message"])
             _append_history(
                 csv_path=history_csv_path,
                 jsonl_path=history_jsonl_path,
                 record={
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "recipient": recipient.email,
-                    "status": history_status,
+                    "recipient": result["recipient"],
+                    "status": result["status"],
                     "template": template_name,
-                    "smtp_account": smtp_account,
-                    "dry_run": str(dry_run).lower(),
-                    "error": history_error,
+                    "smtp_account": result["smtp_account"],
+                    "proxy": result["proxy"],
+                    "reply_to": result["reply_to"],
+                    "dry_run": result["dry_run"],
+                    "error": result["error_msg"],
                 },
             )
 
-        if final_delay > 0 and index < len(recipients):
-            emit(f"Пауза {final_delay:.2f} сек.")
-            time.sleep(final_delay)
+            if final_delay > 0 and index < len(recipients):
+                emit(f"Пауза {final_delay:.2f} сек.")
+                time.sleep(final_delay)
 
     logger.info(
         "Завершено: processed=%s, successful=%s, failed=%s",
         processed,
         successful,
         failed,
+    )
+    return CampaignSummary(
+        total=len(recipients),
+        processed=processed,
+        successful=successful,
+        failed=failed,
+        log_file=log_path,
+        history_csv=history_csv_path,
+        history_jsonl=history_jsonl_path,
     )
     return CampaignSummary(
         total=len(recipients),

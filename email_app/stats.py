@@ -11,7 +11,7 @@ class StatsError(ValueError):
     """Raised when history data is invalid."""
 
 
-@dataclass(slots=True)
+@dataclass
 class HistoryStats:
     total: int
     sent: int
@@ -22,7 +22,7 @@ class HistoryStats:
     top_smtp_accounts: list[tuple[str, int]]
 
 
-@dataclass(slots=True)
+@dataclass
 class HistoryRecord:
     timestamp: str
     recipient: str

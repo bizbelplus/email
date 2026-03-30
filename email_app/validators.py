@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 
 
-@dataclass(slots=True)
+@dataclass
 class EmailValidationResult:
     """Result of email validation."""
 

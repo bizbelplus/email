@@ -10,7 +10,7 @@ class PresetError(ValueError):
     """Raised when preset data is invalid."""
 
 
-@dataclass(slots=True)
+@dataclass
 class CampaignPreset:
     config: str = "config/settings.yaml"
     recipients: str = "recipients.csv"

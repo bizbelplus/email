@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <title>{{ subject }}</title>
+    <style>
+      body { background: #f3f4f6; font-family: Arial, sans-serif; color: #222; }
+      .container { max-width: 600px; margin: 40px auto; background: #fff; border-radius: 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.08); padding: 32px; }
+      h1 { color: #2563eb; }
+      .footer { margin-top: 32px; font-size: 13px; color: #888; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>{{ приветствие | default('Здравствуйте!') }}</h1>
+      <p>{{ текст | default('Это тестовый шаблон. Всё работает!') }}</p>
+      <p><a href="{{ ссылка_кнопки | default('https://example.com') }}" style="color:#2563eb;">Перейти</a></p>
+      <div class="footer">
+        Если письмо пришло по ошибке, просто проигнорируйте его.
+      </div>
+    </div>
+  </body>
+</html>

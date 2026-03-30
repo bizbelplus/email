@@ -4,7 +4,7 @@ import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Union, Optional
 
 from .presets import CampaignPreset
 from .service import CampaignSummary, run_campaign
@@ -14,7 +14,7 @@ class CampaignQueueError(ValueError):
     """Raised when queue file data is invalid."""
 
 
-@dataclass(slots=True)
+@dataclass
 class QueueSummary:
     campaigns_total: int
     campaigns_completed: int
@@ -23,7 +23,7 @@ class QueueSummary:
     total_failed: int
 
 
-def load_campaign_queue(path: str | Path) -> list[CampaignPreset]:
+def load_campaign_queue(path: Union[str, Path]) -> list[CampaignPreset]:
     queue_path = Path(path)
     if not queue_path.exists():
         raise CampaignQueueError(f"Файл очереди не найден: {queue_path}")
@@ -85,7 +85,7 @@ def _load_campaign_queue_csv(queue_path: Path) -> list[CampaignPreset]:
     return presets
 
 
-def save_campaign_queue(path: str | Path, campaigns: list[CampaignPreset]) -> Path:
+def save_campaign_queue(path: Union[str, Path], campaigns: list[CampaignPreset]) -> Path:
     queue_path = Path(path)
     queue_path.parent.mkdir(parents=True, exist_ok=True)
     if queue_path.suffix.lower() == ".csv":
@@ -134,7 +134,7 @@ def run_campaign_queue(
     *,
     base_dir: Path,
     campaigns: list[CampaignPreset],
-    progress_callback: Callable[[str], None] | None = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> QueueSummary:
     def emit(message: str) -> None:
         if progress_callback is not None:

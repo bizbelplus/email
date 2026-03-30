@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+
 import mimetypes
 import smtplib
 import ssl
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Optional
+import socket
+
+try:
+    import socks  # type: ignore
+except ImportError:
+    socks = None
 
 from .models import MessageSettings, Recipient, SMTPSettings
 
@@ -18,8 +26,8 @@ class SMTPMailer:
         recipient: Recipient,
         message_settings: MessageSettings,
         html_body: str,
-        attachment_paths: list[Path] | None = None,
-        inline_image_paths: dict[str, Path] | None = None,
+        attachment_paths: Optional[list[Path]] = None,
+        inline_image_paths: Optional[dict[str, Path]] = None,
     ) -> EmailMessage:
         message = EmailMessage()
         message["Subject"] = message_settings.subject
@@ -56,6 +64,27 @@ class SMTPMailer:
 
     def _open(self) -> smtplib.SMTP:
         timeout = self.settings.timeout_seconds
+        # Прокси поддержка
+        proxy_host = getattr(self.settings, "proxy_host", None)
+        proxy_port = getattr(self.settings, "proxy_port", None)
+        proxy_type = getattr(self.settings, "proxy_type", None)
+        proxy_user = getattr(self.settings, "proxy_user", None)
+        proxy_pass = getattr(self.settings, "proxy_pass", None)
+
+        if proxy_host and proxy_port and proxy_type:
+            if not socks:
+                raise RuntimeError("Для поддержки прокси установите пакет PySocks: pip install PySocks")
+            _type = {
+                "socks5": socks.SOCKS5,
+                "socks4": socks.SOCKS4,
+                "http": socks.HTTP,
+                "https": socks.HTTP,  # HTTP(S) реализуется одинаково
+            }.get(str(proxy_type).lower())
+            if not _type:
+                raise ValueError(f"Неизвестный тип прокси: {proxy_type}")
+            socks.set_default_proxy(_type, proxy_host, proxy_port, True if proxy_user else False, proxy_user, proxy_pass)
+            socket.socket = socks.socksocket
+
         if self.settings.use_ssl:
             return smtplib.SMTP_SSL(
                 host=self.settings.host,
@@ -70,8 +99,8 @@ class SMTPMailer:
         recipient: Recipient,
         message_settings: MessageSettings,
         html_body: str,
-        attachment_paths: list[Path] | None = None,
-        inline_image_paths: dict[str, Path] | None = None,
+        attachment_paths: Optional[list[Path]] = None,
+        inline_image_paths: Optional[dict[str, Path]] = None,
     ) -> None:
         message = self._build_message(
             recipient,

@@ -1,42 +1,27 @@
-<!doctype html>
-<html lang="ru">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ subject }}</title>
-  </head>
-  <body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;color:#111827;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f4f6;padding:24px 0;">
-      <tr>
-        <td align="center">
-          <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,0.08);">
-            <tr>
-              <td style="background:linear-gradient(135deg,#2563eb,#7c3aed);padding:32px 40px;color:#ffffff;">
-                {% if inline_images.hero %}
-                <p style="margin:0 0 18px;">
-                  <img src="cid:{{ inline_images.hero.cid }}" alt="Hero" style="display:block;max-width:160px;height:auto;border:0;">
-                </p>
-                {% endif %}
-                <h1 style="margin:0 0 8px;font-size:28px;line-height:1.2;">{{ headline }}</h1>
-                <p style="margin:0;font-size:16px;line-height:1.6;opacity:0.92;">{{ preheader }}</p>
-              </td>
-            </tr>
-            <tr>
-              <td style="padding:40px;">
-                <p style="margin:0 0 18px;font-size:16px;line-height:1.7;">Здравствуйте{% if recipient.name %}, {{ recipient.name }}{% endif %}!</p>
-                <p style="margin:0 0 18px;font-size:16px;line-height:1.7;">{{ body_intro }}</p>
-                <p style="margin:0 0 24px;font-size:16px;line-height:1.7;">{{ body_text }}</p>
-                {% if cta_url and cta_label %}
-                <p style="margin:0 0 24px;">
-                  <a href="{{ cta_url }}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:14px 22px;border-radius:10px;font-weight:700;">{{ cta_label }}</a>
-                </p>
-                {% endif %}
-                <p style="margin:0;font-size:14px;line-height:1.7;color:#6b7280;">Если письмо пришло по ошибке, просто проигнорируйте его.</p>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </body>
-</html>
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0//EN" "http://www.w3.org/TR/REC-html40/strict.dtd">
+<html><head><meta name="qrichtext" content="1" /><meta charset="utf-8" /><title>{{ subject }}</title><style type="text/css">
+p, li { white-space: pre-wrap; }
+hr { height: 1px; border-width: 0; }
+li.unchecked::marker { content: "\2610"; }
+li.checked::marker { content: "\2612"; }
+</style></head><body style=" font-family:'Segoe UI','Arial'; font-size:11pt; font-weight:400; font-style:normal;" bgcolor="#f3f4f6">
+<table border="0" style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px;" width="100%" cellspacing="0" cellpadding="0" bgcolor="#f3f4f6">
+<tr>
+<td>
+<table border="0" style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px;" align="center" width="640" cellspacing="0" cellpadding="0" bgcolor="#ffffff">
+<tr>
+<td style=" padding-left:40; padding-right:40; padding-top:32; padding-bottom:32;">
+<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><span style=" font-family:'Arial','sans-serif'; color:#ffffff;">{% if inline_images.hero %} </span></p>
+<p style=" margin-top:0px; margin-bottom:18px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><img src="cid:{{ inline_images.hero.cid }}" alt="Hero" style="max-width:160px;" /><span style=" font-family:'Arial','sans-serif'; color:#ffffff;"> </span></p>
+<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><span style=" font-family:'Arial','sans-serif'; color:#ffffff;">{% endif %} </span></p>
+<h1 style=" margin-top:0px; margin-bottom:8px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; line-height:120%;"><span style=" font-family:'Arial','sans-serif'; font-size:xx-large; font-weight:700; color:#ffffff;">{{ приветствие }}</span><span style=" font-family:'Arial','sans-serif'; color:#ffffff;"> </span></h1>
+<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; line-height:160%;"><span style=" font-family:'Arial','sans-serif'; font-size:16px; color:#ffffff;">{{ кратко }}</span><span style=" font-family:'Arial','sans-serif'; color:#ffffff;"> </span></p></td></tr>
+<tr>
+<td style=" padding-left:40; padding-right:40; padding-top:40; padding-bottom:40;">
+<p style=" margin-top:0px; margin-bottom:18px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; line-height:170%;"><span style=" font-family:'Arial','sans-serif'; font-size:16px; color:#ff337d;">Здравствуйте</span><span style=" font-family:'Arial','sans-serif'; font-size:16px; color:#111827;">{% if recipient.имя %}, {{ recipient.имя }}{% endif %}!</span><span style=" font-family:'Arial','sans-serif'; color:#111827;"> </span></p>
+<p style=" margin-top:0px; margin-bottom:18px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; line-height:170%;"><span style=" font-family:'Arial','sans-serif'; font-size:16px; color:#111827;">{{ вступление }}</span><span style=" font-family:'Arial','sans-serif'; color:#111827;"> </span></p>
+<p style=" margin-top:0px; margin-bottom:24px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; line-height:170%;"><span style=" font-family:'Arial','sans-serif'; font-size:16px; color:#111827;">{{ текст }}</span></p>
+<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><span style=" font-family:'Arial','sans-serif'; color:#111827;">{% if ссылка_кнопки and кнопка %} </span></p>
+<p style=" margin-top:0px; margin-bottom:24px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><a href="{{ ссылка_кнопки }}"><span style=" font-family:'Arial','sans-serif'; font-weight:700; color:#ffffff; background-color:#2563eb;">{{ кнопка }}</span></a><span style=" font-family:'Arial','sans-serif'; color:#111827;"> </span></p>
+<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><span style=" font-family:'Arial','sans-serif'; color:#111827;">{% endif %} </span></p>
+<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; line-height:170%;"><span style=" font-family:'Arial','sans-serif'; font-size:14px; color:#6b7280;">Если письмо пришло по ошибке, просто проигнорируйте его.</span><span style=" font-family:'Arial','sans-serif'; color:#111827;"> </span></p></td></tr></table></td></tr></table></body></html>

@@ -15,14 +15,21 @@ class SMTPSettings:
     use_tls: bool = True
     use_ssl: bool = False
     timeout_seconds: int = 30
+    # Proxy support
+    proxy_host: str | None = None
+    proxy_port: int | None = None
+    proxy_type: str | None = None  # socks5, http, https
+    proxy_user: str | None = None
+    proxy_pass: str | None = None
 
 
 @dataclass(slots=True)
 class MessageSettings:
     subject: str
-    template: str
+    template: str | None = None
     reply_to: str | None = None
     attachments: list[str] = field(default_factory=list)
+    random_attachments_folder: str | None = None
     inline_images: dict[str, str] = field(default_factory=dict)
 
 
@@ -38,6 +45,10 @@ class DeliverySettings:
     # Scheduling & rate limiting
     scheduled_time: str | None = None  # ISO 8601, e.g. "2025-03-30T10:00:00"
     rate_limit_per_minute: int | None = None  # Max emails/minute
+    # Parallel SMTP workers
+    parallel_smtp_enabled: bool = False
+    parallel_smtp_accounts: int = 1  # number of concurrent SMTP sessions
+    batch_interval_seconds: float = 0.0  # time between batches of parallel sends
     # Retry on failure
     retry_attempts: int = 1
     retry_backoff_seconds: float = 5.0

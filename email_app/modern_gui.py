@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib
+import os
 import queue
+import random
 import subprocess
 import sys
 import threading
@@ -18,6 +20,7 @@ from .config import ConfigError, load_config
 from .presets import CampaignPreset, PresetError, load_preset, save_preset
 from .renderer import TemplateRenderer
 from .service import CampaignError, render_preview, run_campaign, run_preflight
+from .recipients import RecipientsError, load_recipients
 from .stats import (
     StatsError,
     export_history_records,
@@ -54,12 +57,24 @@ class ModernEmailAppGUI:
         self.recipients_var = ctk.StringVar(value="recipients.csv")
         self.templates_var = ctk.StringVar(value="templates")
         self.template_var = ctk.StringVar(value="")
+        self.attachments_folder_var = ctk.StringVar(value="")
+        self.external_editor_path = ctk.StringVar(value="")
+        self.proxy_enabled_var = ctk.BooleanVar(value=True)
+        self.live_preview_var = ctk.BooleanVar(value=True)
+        self.preview_recipient_var = ctk.StringVar(value="")
+        self.mobile_preview_var = ctk.BooleanVar(value=False)
+        self.replyto_mode_var = ctk.StringVar(value="random")
+        self.replyto_count_var = ctk.StringVar(value="0")
         self.delay_var = ctk.StringVar(value="0")
         self.rate_limit_var = ctk.StringVar(value="")
         self.retry_attempts_var = ctk.StringVar(value="1")
+        self.parallel_smtp_var = ctk.StringVar(value="1")
+        self.parallel_enabled_var = ctk.BooleanVar(value=False)
+        self.batch_interval_var = ctk.StringVar(value="0")
         self.retry_backoff_var = ctk.StringVar(value="5")
         self.dry_run_var = ctk.BooleanVar(value=True)
         self.status_var = ctk.StringVar(value="✓ Готово к запуску")
+        self.editor_live_job = None
 
         self._build()
         if self.current_preset_path:
@@ -122,10 +137,26 @@ class ModernEmailAppGUI:
         self.template_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8))
         self.ctk.CTkButton(template_row, text="↻ Обновить", width=90, command=self._refresh_templates).grid(row=0, column=2)
 
+        attachments_folder_row = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        attachments_folder_row.pack(fill="x", padx=12, pady=(0, 8))
+        attachments_folder_row.grid_columnconfigure(0, weight=1)
+        self.ctk.CTkLabel(attachments_folder_row, text="Папка вложений:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkEntry(attachments_folder_row, textvariable=self.attachments_folder_var, width=360).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.ctk.CTkButton(attachments_folder_row, text="📁", command=self._select_attachments_folder).grid(row=0, column=2)
+        self.attachments_info_label = self.ctk.CTkLabel(attachments_folder_row, text="Файлов: 0")
+        self.attachments_info_label.grid(row=1, column=0, columnspan=3, sticky="w", padx=(0, 8), pady=(4, 0))
+
+        template_meta_row = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        template_meta_row.pack(fill="x", padx=12, pady=(0, 8))
+        template_meta_row.grid_columnconfigure(0, weight=1)
+        self.template_vars_label = self.ctk.CTkLabel(template_meta_row, text="Переменных в шаблоне: 0")
+        self.template_vars_label.grid(row=0, column=0, sticky="w")
+        self.ctk.CTkButton(template_meta_row, text="Проверить переменные", command=self._check_template_variables).grid(row=0, column=1, padx=(8,0))
+
         # Сетка опций: delay, rate limit, retry
         options_frame = self.ctk.CTkFrame(template_section, fg_color="transparent")
         options_frame.pack(fill="x", padx=12, pady=8)
-        for i in range(3):
+        for i in range(5):
             options_frame.grid_columnconfigure(i, weight=1)
 
         self.ctk.CTkLabel(options_frame, text="Задержка, сек").grid(row=0, column=0, sticky="w")
@@ -142,6 +173,20 @@ class ModernEmailAppGUI:
         self.ctk.CTkLabel(retry_row, text="откат (сек):").grid(row=0, column=1, padx=(8, 4), sticky="w")
         self.ctk.CTkEntry(retry_row, textvariable=self.retry_backoff_var, width=50).grid(row=0, column=2, sticky="ew")
 
+        self.ctk.CTkLabel(options_frame, text="SMTP parallel").grid(row=0, column=3, sticky="w")
+        self.ctk.CTkEntry(options_frame, textvariable=self.parallel_smtp_var, width=100).grid(row=1, column=3, sticky="ew", padx=(0, 8))
+
+        self.ctk.CTkLabel(options_frame, text="Пауза batch (сек)").grid(row=0, column=4, sticky="w")
+        self.ctk.CTkEntry(options_frame, textvariable=self.batch_interval_var, width=100).grid(row=1, column=4, sticky="ew", padx=(0, 8))
+
+        self.ctk.CTkCheckBox(
+            options_frame,
+            text="Параллельная отправка",
+            variable=self.parallel_enabled_var,
+            onvalue=True,
+            offvalue=False,
+        ).grid(row=2, column=3, columnspan=2, sticky="w", pady=(6,0))
+
         # Чекбокс dry-run
         check_frame = self.ctk.CTkFrame(template_section, fg_color="transparent")
         check_frame.pack(fill="x", padx=12, pady=8)
@@ -152,6 +197,26 @@ class ModernEmailAppGUI:
             onvalue=True,
             offvalue=False,
         ).pack(anchor="w")
+
+        # === REPLY-TO (новый блок) ===
+        replyto_section = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        replyto_section.pack(fill="x", padx=12, pady=8)
+        self.ctk.CTkLabel(replyto_section, text="Reply-To (адрес для ответов):").grid(row=0, column=0, sticky="w")
+        self.replyto_var = self.ctk.StringVar(value="")
+        self.replyto_combo = self.ctk.CTkComboBox(replyto_section, variable=self.replyto_var, values=[], width=320)
+        self.replyto_combo.grid(row=0, column=1, padx=(8, 8))
+        self.ctk.CTkButton(replyto_section, text="Загрузить txt", command=self._load_replyto_txt).grid(row=0, column=2)
+        self.ctk.CTkLabel(replyto_section, textvariable=self.replyto_count_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4,0))
+
+        replyto_mode_section = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        replyto_mode_section.pack(fill="x", padx=12, pady=(0,8))
+        self.ctk.CTkLabel(replyto_mode_section, text="Режим Reply-To:").grid(row=0, column=0, sticky="w")
+        self.ctk.CTkRadioButton(replyto_mode_section, text="Случайный для каждого", variable=self.replyto_mode_var, value="random").grid(row=0, column=1, padx=4)
+        self.ctk.CTkRadioButton(replyto_mode_section, text="Фиксированный выбранный", variable=self.replyto_mode_var, value="fixed").grid(row=0, column=2, padx=4)
+
+        proxy_section = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        proxy_section.pack(fill="x", padx=12, pady=4)
+        self.ctk.CTkCheckBox(proxy_section, text="Использовать прокси", variable=self.proxy_enabled_var, onvalue=True, offvalue=False).pack(anchor="w")
 
         # === ДЕЙСТВИЯ (Раздел 3) ===
         actions_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
@@ -249,12 +314,32 @@ class ModernEmailAppGUI:
         )
         if path:
             self.recipients_var.set(self._relative(Path(path)))
+            self._load_recipients_for_preview()
 
     def _select_templates(self) -> None:
         path = filedialog.askdirectory(initialdir=self.base_dir)
         if path:
             self.templates_var.set(self._relative(Path(path)))
             self._refresh_templates()
+
+    def _select_attachments_folder(self) -> None:
+        path = filedialog.askdirectory(initialdir=self.base_dir)
+        if path:
+            self.attachments_folder_var.set(self._relative(Path(path)))
+            self._update_random_attachment_count()
+
+    def _update_random_attachment_count(self) -> None:
+        folder = self.attachments_folder_var.get().strip()
+        if not folder:
+            count = 0
+        else:
+            folder_path = (self.base_dir / folder).resolve()
+            if folder_path.exists() and folder_path.is_dir():
+                allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg"}
+                count = len([p for p in folder_path.iterdir() if p.is_file() and p.suffix.lower() in allowed_ext])
+            else:
+                count = 0
+        self.attachments_info_label.configure(text=f"Файлов: {count}")
 
     def _refresh_templates(self) -> None:
         template_dir = self.base_dir / self.templates_var.get()
@@ -268,6 +353,25 @@ class ModernEmailAppGUI:
             self.template_combo.configure(values=[""])
             self.template_var.set("")
 
+    def _pick_random_replyto(self) -> str:
+        # Получить список email из комбобокса (или файла)
+        emails = self.replyto_combo.cget("values")
+        import random
+        emails = [e for e in emails if e.strip()]
+
+        if emails:
+            return random.choice(emails)
+
+        # fallback: взять reply_to из конфига, если он задан
+        try:
+            config = load_config(self.base_dir / self.config_var.get())
+            if config.message.reply_to:
+                return config.message.reply_to
+        except ConfigError:
+            pass
+
+        return ""
+
     def _start_send(self) -> None:
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("Email App Modern", "Отправка уже выполняется")
@@ -278,6 +382,8 @@ class ModernEmailAppGUI:
         except ValueError:
             messagebox.showerror("Email App Modern", "Задержка должна быть числом")
             return
+
+        self._update_random_attachment_count()
 
         try:
             preflight = run_preflight(
@@ -312,11 +418,17 @@ class ModernEmailAppGUI:
                 self.status_var.set("⊘ Отправка отменена")
                 return
 
+        # Рандомный выбор Reply-To
+        reply_to_random = self._pick_random_replyto()
+        if not reply_to_random:
+            messagebox.showerror("Reply-To", "Не выбран ни один email для Reply-To!")
+            return
+        self.replyto_var.set(reply_to_random)
+
         self.status_var.set("⏳ Запуск...")
-        self._append_log("▶ Старт задачи")
+        self._append_log(f"▶ Старт задачи (Reply-To: {reply_to_random})")
         self.worker = threading.Thread(target=self._run_worker, args=(delay,), daemon=True)
         self.worker.start()
-
     def _run_queue_dialog(self) -> None:
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("Email App Modern", "Задача уже выполняется")
@@ -377,7 +489,18 @@ class ModernEmailAppGUI:
                 config.delivery.retry_backoff_seconds = float(self.retry_backoff_var.get().strip() or "5")
             except ValueError:
                 pass
+
+            # Override concurrency settings if set in GUI
+            try:
+                config.delivery.parallel_smtp_enabled = self.parallel_enabled_var.get()
+                config.delivery.parallel_smtp_accounts = max(1, int(self.parallel_smtp_var.get().strip() or "1"))
+                config.delivery.batch_interval_seconds = float(self.batch_interval_var.get().strip() or "0")
+            except ValueError:
+                pass
             
+            # Передать reply_to в message
+            config.message.reply_to = self.replyto_var.get()
+
             summary = run_campaign(
                 base_dir=self.base_dir,
                 config_path=self.base_dir / self.config_var.get(),
@@ -385,7 +508,15 @@ class ModernEmailAppGUI:
                 templates_path=self.base_dir / self.templates_var.get(),
                 dry_run=self.dry_run_var.get(),
                 template_override=self.template_var.get() or None,
+                random_attachments_folder_override=self.attachments_folder_var.get() or None,
+                use_proxy=self.proxy_enabled_var.get(),
                 delay_override=delay,
+                rate_limit_per_minute=config.delivery.rate_limit_per_minute,
+                retry_attempts=config.delivery.retry_attempts,
+                retry_backoff_seconds=config.delivery.retry_backoff_seconds,
+                parallel_smtp_enabled=self.parallel_enabled_var.get(),
+                parallel_smtp_accounts=config.delivery.parallel_smtp_accounts,
+                batch_interval_seconds=config.delivery.batch_interval_seconds,
                 progress_callback=lambda message: self.queue.put(("log", message)),
             )
             self.queue.put(("log", f"История CSV: {summary.history_csv}"))
@@ -462,26 +593,25 @@ class ModernEmailAppGUI:
         self._append_log(f"Статистика экспортирована: {export_path}")
         self.status_var.set("Статистика экспортирована")
 
-    def _show_preview_window(self, html_content: str, preview_path: Path) -> None:
+    def _show_preview_window(self, html_content: str, preview_path: Path, mobile: bool = False) -> None:
+        import webbrowser
         if self.preview_window is None or not self.preview_window.winfo_exists():
             self.preview_window = self.ctk.CTkToplevel(self.root)
             self.preview_window.title("HTML Preview")
-            self.preview_window.geometry("1180x800")
+            self.preview_window.geometry("420x800" if mobile else "1180x800")
 
             toolbar = self.ctk.CTkFrame(self.preview_window)
             toolbar.pack(fill="x", padx=12, pady=12)
             self.ctk.CTkButton(
                 toolbar,
-                text="Открыть в браузере",
-                command=lambda: render_preview(
-                    base_dir=self.base_dir,
-                    config_path=self.base_dir / self.config_var.get(),
-                    recipients_path=self.base_dir / self.recipients_var.get(),
-                    templates_path=self.base_dir / self.templates_var.get(),
-                    template_override=self.template_var.get() or None,
-                    open_in_browser=True,
-                ),
+                text="Открыть предпросмотр в браузере",
+                command=lambda: webbrowser.open(preview_path.as_uri()),
             ).pack(side="left")
+            self.ctk.CTkButton(
+                toolbar,
+                text="Показать CSS",
+                command=lambda: self._show_css_window(html_content),
+            ).pack(side="left", padx=(6, 0))
             self.ctk.CTkLabel(toolbar, text=str(preview_path)).pack(side="left", padx=12)
 
             content = self.ctk.CTkFrame(self.preview_window)
@@ -514,28 +644,57 @@ class ModernEmailAppGUI:
         self.preview_source_text.delete("1.0", "end")
         self.preview_source_text.insert("1.0", html_content)
 
+    def _show_css_window(self, html_content: str) -> None:
+        import re
+        styles = re.findall(r"<style[^>]*>(.*?)</style>", html_content, flags=re.DOTALL | re.IGNORECASE)
+        if not styles:
+            messagebox.showinfo("CSS", "В шаблоне не найдено блоков <style>")
+            return
+
+        css_window = self.ctk.CTkToplevel(self.root)
+        css_window.title("CSS из шаблона")
+        css_window.geometry("800x500")
+        css_box = self.ctk.CTkTextbox(css_window, wrap="none")
+        css_box.pack(fill="both", expand=True, padx=12, pady=12)
+        css_box.insert("1.0", "\n\n---\n\n".join(styles))
+
     def _preview_email(self) -> None:
+        import webbrowser
         try:
+            reply_to_random = self._pick_random_replyto()
+            if reply_to_random:
+                self.replyto_var.set(reply_to_random)
             summary = render_preview(
                 base_dir=self.base_dir,
                 config_path=self.base_dir / self.config_var.get(),
                 recipients_path=self.base_dir / self.recipients_var.get(),
-                templates_path=self.base_dir / self.templates_var.get(),
+                templates_path=self.templates_var.get(),
                 template_override=self.template_var.get() or None,
-                open_in_browser=False,
+                recipient_email=self.preview_recipient_var.get() or None,
+                open_in_browser=True,
             )
-            html_content = summary.preview_path.read_text(encoding="utf-8")
             message = (
                 f"Предпросмотр сохранён: {summary.preview_path}\n"
                 f"Шаблон: {summary.template_name}\n"
-                f"Получатель: {summary.recipient_email}"
+                f"Получатель: {summary.recipient_email}\n"
+                f"Reply-To: {reply_to_random or '(из конфига)'}"
             )
-            self._show_preview_window(html_content=html_content, preview_path=summary.preview_path)
             self._append_log(message)
-            self.status_var.set("Предпросмотр открыт в GUI")
+            self.status_var.set("Предпросмотр открыт в браузере")
         except CampaignError as error:
-            self._append_log(f"Ошибка предпросмотра: {error}")
-            messagebox.showerror("Email App Modern", str(error))
+            # Логируем список шаблонов и выбранный шаблон для диагностики
+            template_dir = self.base_dir / self.templates_var.get()
+            renderer = TemplateRenderer(template_dir)
+            templates = renderer.list_templates()
+            selected_template = self.template_var.get()
+            log_message = (
+                f"Ошибка предпросмотра: {error}\n"
+                f"Доступные шаблоны: {templates}\n"
+                f"Выбранный шаблон: '{selected_template}'\n"
+                f"Папка шаблонов: {template_dir}"
+            )
+            self._append_log(log_message)
+            messagebox.showerror("Email App Modern", log_message)
 
     def _show_stats(self) -> None:
         try:
@@ -603,14 +762,53 @@ class ModernEmailAppGUI:
             toolbar.pack(fill="x", padx=12, pady=12)
             self.ctk.CTkButton(toolbar, text="Перезагрузить", command=self._load_template_into_editor).pack(side="left")
             self.ctk.CTkButton(toolbar, text="Сохранить", command=self._save_template_from_editor).pack(side="left", padx=8)
+            self.ctk.CTkButton(toolbar, text="Сохранить и показать", command=self._save_and_preview_from_editor).pack(side="left", padx=8)
+            self.ctk.CTkButton(toolbar, text="Выбрать редактор", command=self._select_external_editor).pack(side="left", padx=8)
+            self.ctk.CTkButton(toolbar, text="Открыть в редакторе ОС", command=self._open_template_in_external).pack(side="left", padx=8)
 
             self.editor_text = self.ctk.CTkTextbox(self.editor_window, wrap="none")
             self.editor_text.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+            self.editor_text.bind("<KeyRelease>", self._on_editor_key_release)
+            self.editor_window.bind_all("<Control-s>", lambda event: self._save_and_preview_from_editor())
         else:
             self.editor_window.lift()
 
         self._load_template_into_editor()
         self._append_log(f"Шаблон открыт в редакторе: {template_path}")
+
+    def _select_external_editor(self) -> None:
+        editor_path = filedialog.askopenfilename(
+            title="Выберите исполняемый файл внешнего редактора",
+            filetypes=[("Executable", "*.exe *.app *")],
+        )
+        if not editor_path:
+            return
+        self.external_editor_path.set(editor_path)
+        self._append_log(f"Выбран внешний редактор: {editor_path}")
+        messagebox.showinfo("Email App Modern", f"Выбран внешний редактор: {editor_path}")
+
+    def _open_template_in_external(self) -> None:
+        try:
+            template_path = self._current_template_path()
+        except CampaignError as error:
+            messagebox.showerror("Email App Modern", str(error))
+            return
+
+        editor_path = self.external_editor_path.get().strip()
+        try:
+            if editor_path:
+                subprocess.Popen([editor_path, str(template_path)])
+            else:
+                if sys.platform.startswith("darwin"):
+                    subprocess.run(["open", str(template_path)])
+                elif sys.platform.startswith("win"):
+                    os.startfile(str(template_path))
+                else:
+                    subprocess.run(["xdg-open", str(template_path)])
+            self._append_log(f"Шаблон открыт во внешнем редакторе: {template_path}")
+        except Exception as error:
+            messagebox.showerror("Email App Modern", f"Не удалось открыть файл в системе: {error}")
+            self._append_log(f"Ошибка внешнего открытия шаблона: {error}")
 
     def _open_visual_template_editor(self) -> None:
         try:
@@ -649,8 +847,10 @@ class ModernEmailAppGUI:
         self.editor_text.delete("1.0", "end")
         self.editor_text.insert("1.0", template_path.read_text(encoding="utf-8"))
         self.status_var.set("Шаблон открыт")
+        self._check_template_variables()
+        self._load_recipients_for_preview()
 
-    def _save_template_from_editor(self) -> None:
+    def _save_template_from_editor(self, suppress_message: bool = False) -> None:
         if self.editor_text is None:
             return
         template_path = self._current_template_path()
@@ -658,7 +858,8 @@ class ModernEmailAppGUI:
         template_path.write_text(self.editor_text.get("1.0", "end").rstrip() + "\n", encoding="utf-8")
         self._append_log(f"Шаблон сохранён: {template_path}")
         self.status_var.set("Шаблон сохранён")
-        messagebox.showinfo("Email App Modern", f"Шаблон сохранён: {template_path}")
+        if not suppress_message:
+            messagebox.showinfo("Email App Modern", f"Шаблон сохранён: {template_path}")
 
     def _save_preset_dialog(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -757,6 +958,90 @@ class ModernEmailAppGUI:
         """Handle theme change."""
         theme = self.theme_var.get()
         self.ctk.set_appearance_mode(theme)
+
+    def _load_replyto_txt(self):
+        file_path = filedialog.askopenfilename(
+            title="Выберите txt-файл с email-адресами",
+            filetypes=[("Text files", "*.txt")],
+        )
+        if not file_path:
+            return
+        emails = []
+        with open(file_path, encoding="utf-8") as f:
+            for line in f:
+                email = line.strip()
+                if email and "@" in email:
+                    emails.append(email)
+        if not emails:
+            messagebox.showerror("Reply-To", "В файле нет ни одного email!")
+            return
+        self.replyto_combo.configure(values=emails)
+        self.replyto_var.set(emails[0])
+        self.replyto_count_var.set(f"Reply-To адресов: {len(emails)}")
+
+    def _pick_random_replyto(self) -> str:
+        current_values = list(self.replyto_combo.cget("values"))
+        current_values = [e for e in current_values if e.strip()]
+
+        if self.replyto_mode_var.get() == "fixed":
+            selected = self.replyto_var.get().strip()
+            if selected and selected in current_values:
+                return selected
+            if current_values:
+                return current_values[0]
+
+        if current_values:
+            return random.choice(current_values)
+
+        # fallback to config reply_to
+        try:
+            config = load_config(self.base_dir / self.config_var.get())
+            if config.message.reply_to:
+                return config.message.reply_to
+        except ConfigError:
+            pass
+
+        return ""
+
+    def _load_recipients_for_preview(self) -> None:
+        try:
+            recipients = load_recipients(self.base_dir / self.recipients_var.get())
+        except RecipientsError:
+            self.preview_recipient_combo.configure(values=[])
+            self.preview_recipient_var.set("")
+            return
+        values = [recipient.email for recipient in recipients]
+        self.preview_recipient_combo.configure(values=values)
+        if values:
+            self.preview_recipient_var.set(values[0])
+
+    def _check_template_variables(self) -> None:
+        try:
+            template_dir = self.base_dir / self.templates_var.get()
+            renderer = TemplateRenderer(template_dir)
+            template_name = self.template_var.get().strip()
+            if not template_name:
+                messagebox.showinfo("Переменные шаблона", "Шаблон не выбран")
+                return
+            vars_set = renderer.extract_template_variables(template_name)
+            self.template_vars_label.configure(text=f"Переменных в шаблоне: {len(vars_set)}")
+            if vars_set:
+                messagebox.showinfo("Переменные шаблона", "Найденные переменные:\n" + "\n".join(sorted(vars_set)))
+            else:
+                messagebox.showinfo("Переменные шаблона", "Переменные не найдены")
+        except Exception as err:
+            messagebox.showerror("Переменные шаблона", f"Ошибка при анализе шаблона: {err}")
+
+    def _on_editor_key_release(self, event=None) -> None:
+        if self.editor_live_job:
+            self.editor_window.after_cancel(self.editor_live_job)
+        if self.live_preview_var.get():
+            self.editor_live_job = self.editor_window.after(700, self._save_and_preview_from_editor)
+
+    def _save_and_preview_from_editor(self) -> None:
+        self._save_template_from_editor(suppress_message=True)
+        self._check_template_variables()
+        self._preview_email()
 
     def run(self) -> None:
         self.root.mainloop()

@@ -1,38 +1,151 @@
 # Email app на Python
 
-Это минимальное и безопасное SMTP-приложение для **легитимной** отправки HTML-писем по вашему списку получателей.
 
-Поддерживается:
-- SMTP
-- несколько SMTP-аккаунтов из CSV
+Современное и безопасное SMTP-приложение для **легитимной** рассылки HTML-писем по вашему списку получателей.
+Поддерживает прокси, пул SMTP-аккаунтов, вложения, inline-изображения, персонализацию, лимиты, антидубли, статистику, визуальный редактор и многое другое.
+
+
+**Возможности:**
+- SMTP (TLS/SSL)
+- Прокси (SOCKS5, HTTP(S), с авторизацией)
+- Пул SMTP-аккаунтов (CSV, ротация)
 - HTML-шаблоны через Jinja2
-- персонализация по CSV
-- `dry-run` режим для проверки
-- TLS/SSL
-- desktop GUI на `tkinter`
-- modern GUI на `customtkinter`
-- вложения
-- inline-картинки через `cid:`
-- задержка между письмами
-- логирование в файл
-- история отправок в CSV и JSONL
-- HTML-предпросмотр перед отправкой
-- пресеты кампаний в YAML
-- встроенный редактор HTML-шаблонов
-- визуальный редактор письма с форматированием как в Word
-- preflight-чеклист перед запуском кампании
-- валидация шаблона и ссылок перед отправкой
-- антидубли (пропуск ранее отправленных адресов)
-- импорт очереди кампаний из JSON/CSV
-- страница статистики по истории отправок
-- фильтрация и экспорт статистики
-- встроенный HTML preview внутри GUI
-
-Не добавлял функции, которые могут использоваться для обхода ограничений почтовых сервисов или нежелательных рассылок, вроде прокси-ротации и спинтакса/рандомизации текста.
+- Персонализация по CSV и переменным
+- Вложения и inline-изображения (cid:)
+- Встроенный визуальный редактор (modern GUI)
+- Preflight-чеклист и валидация шаблонов
+- Антидубли (skip_previously_sent, dedupe)
+- Лимиты отправки (rate_limit_per_minute и др.)
+- Логирование и история отправок (CSV, JSONL)
+- Статистика, фильтрация, экспорт
+- Импорт/экспорт очередей кампаний (JSON/CSV)
+- Пресеты кампаний (YAML)
+- HTML preview и предпросмотр в GUI
+- Поддержка Reply-To, BCC, delay, retry
 
 > 📖 **Подробное пошаговое руководство:** [GUIDE.md](GUIDE.md)
 
-## Структура
+
+## Быстрый старт
+
+1. Скопируйте config/settings.example.yaml → config/settings.yaml и заполните свои SMTP-данные.
+2. Подготовьте recipients.csv (минимум столбец email, остальные — для персонализации).
+3. Запустите dry-run для проверки:
+    ```bash
+    python -m email_app --dry-run
+    ```
+4. Для реальной отправки:
+    ```bash
+    python -m email_app
+    ```
+5. Для запуска GUI:
+    ```bash
+    python -m email_app --modern-gui
+    ```
+
+## Пример конфига (YAML)
+
+```yaml
+smtp:
+   host: smtp.example.com
+   port: 587
+   username: user@example.com
+   password: CHANGE_ME
+   from_email: user@example.com
+   from_name: Example Sender
+   use_tls: true
+   use_ssl: false
+   timeout_seconds: 30
+   # proxy_host: 127.0.0.1
+   # proxy_port: 1080
+   # proxy_type: socks5  # или http, https
+   # proxy_user: null
+   # proxy_pass: null
+   # accounts_file: config/smtp_accounts.example.csv
+
+message:
+   subject: "Пример HTML-письма"
+   template: newsletter.html
+   reply_to: support@example.com
+   attachments:
+      - files/example.txt
+   inline_images:
+      hero: files/example-inline.svg
+
+delivery:
+   delay_seconds: 0.5
+   log_file: logs/email_app.log
+   history_csv: history/email_history.csv
+   history_jsonl: history/email_history.jsonl
+   skip_previously_sent: false
+   dedupe_template_scope: true
+   dedupe_history_days: 30
+   scheduled_time: null
+   rate_limit_per_minute: 20
+   retry_attempts: 2
+   retry_backoff_seconds: 10
+
+content:
+   headline: "Добро пожаловать"
+   preheader: "Короткое описание письма"
+   body_intro: "Это пример безопасного SMTP-приложения на Python для легитимной рассылки opt-in писем."
+   body_text: "Вы можете менять тему, шаблон, inline-изображения и персональные поля через CSV и YAML-конфиг."
+   cta_label: "Открыть сайт"
+   cta_url: "https://example.com"
+```
+
+## Пример CSV получателей
+
+```csv
+email,name,company
+user@example.com,Иван,Example LLC
+```
+
+## Пример пула SMTP-аккаунтов (CSV)
+
+```csv
+host,port,username,password,from_email,from_name,use_tls,use_ssl,timeout_seconds
+smtp.example.com,587,mailer1@example.com,CHANGE_ME,mailer1@example.com,Mailer One,true,false,30
+smtp.example.com,587,mailer2@example.com,CHANGE_ME,mailer2@example.com,Mailer Two,true,false,30
+```
+
+## Пример шаблона (Jinja2)
+
+```html
+<p>Здравствуйте, {{ recipient.name }}!</p>
+<p>{{ body_intro }}</p>
+<a href="{{ cta_url }}">{{ cta_label }}</a>
+```
+
+## Пример вложения inline-изображения
+
+```yaml
+message:
+   inline_images:
+      hero: files/my-logo.png
+```
+```html
+<img src="cid:{{ inline_images.hero.cid }}" alt="Логотип">
+```
+
+## Пример запуска с прокси
+
+```bash
+python -m email_app --config config/settings.yaml
+# или с указанием прокси в YAML (см. выше)
+```
+
+## Советы и лучшие практики
+
+- Используйте только для легитимных рассылок (opt-in).
+- Перед запуском всегда делайте dry-run.
+- Проверяйте лимиты SMTP-провайдера и не превышайте их.
+- Используйте антидубли и историю отправок для чистоты базы.
+- Для массовых рассылок используйте пул SMTP и прокси.
+- Храните шаблоны и пресеты для повторного использования.
+- В случае ошибок смотрите логи и историю.
+
+---
 
 - [email_app/main.py](email_app/main.py) — CLI-вход
 - [email_app/config.py](email_app/config.py) — загрузка YAML-конфига
@@ -52,24 +165,27 @@
 - [presets/queue.example.json](presets/queue.example.json) — пример очереди кампаний
 - [presets/queue.example.csv](presets/queue.example.csv) — пример очереди кампаний в CSV
 
-## Установка
 
-> **Требуется Python 3.10 или новее** (используются `@dataclass(slots=True)` и `X | Y` типы).
+## Установка и документация
 
-1. Создайте виртуальное окружение на Python 3.10+:
+> **Требуется Python 3.10 или новее** (используются современные типы и dataclass).
 
-   `python3.10 -m venv .venv && source .venv/bin/activate`
-
+1. Создайте виртуальное окружение:
+   ```bash
+   python3.10 -m venv .venv && source .venv/bin/activate
+   ```
 2. Установите зависимости:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Скопируйте пример конфига:
+   ```bash
+   cp config/settings.example.yaml config/settings.yaml
+   ```
+4. Заполните свои SMTP-данные и проверьте recipients.csv.
+5. Подробнее — см. [GUIDE.md](GUIDE.md).
 
-   `pip install -r requirements.txt`
-
-3. Скопируйте [config/settings.example.yaml](config/settings.example.yaml) в `config/settings.yaml`.
-4. Укажите ваши SMTP-данные.
-5. Подготовьте [recipients.csv](recipients.csv).
-6. При необходимости обновите список вложений в конфиге.
-
-См. подробный разбор каждого шага в [GUIDE.md](GUIDE.md).
+---
 
 ## Запуск
 
@@ -266,3 +382,22 @@ message:
 - тёмный HTML preview-шаблон
 - быстрые пресеты фильтров статистики
 - CSV-импорт нескольких очередей за раз
+
+## Использование рандомных прокси
+
+Для рандомизации прокси создайте файл `config/proxies.txt`:
+
+```
+185.252.215.173:24091:socks5:111111:111111
+185.252.215.173:40238:socks5:111111:111111
+185.252.215.173:39878:socks5:111111:111111
+185.252.215.173:30808:socks5:111111:111111
+185.252.215.173:33674:socks5:111111:111111
+185.252.215.173:39117:socks5:111111:111111
+```
+
+- Формат: host:port:type[:user:pass]
+- Для каждого письма прокси выбирается случайно из этого списка.
+- Если файл отсутствует — используется стандартная логика (прокси из конфига или из аккаунта).
+
+Прокси подставляются независимо от SMTP-аккаунта!

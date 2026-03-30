@@ -21,6 +21,7 @@ def _require(mapping: dict[str, Any], key: str) -> Any:
 
 
 def _build_smtp_settings(mapping: dict[str, Any]) -> SMTPSettings:
+
     smtp = SMTPSettings(
         host=str(_require(mapping, "host")),
         port=int(_require(mapping, "port")),
@@ -31,6 +32,11 @@ def _build_smtp_settings(mapping: dict[str, Any]) -> SMTPSettings:
         use_tls=bool(mapping.get("use_tls", True)),
         use_ssl=bool(mapping.get("use_ssl", False)),
         timeout_seconds=int(mapping.get("timeout_seconds", 30)),
+        proxy_host=mapping.get("proxy_host"),
+        proxy_port=int(mapping["proxy_port"]) if mapping.get("proxy_port") else None,
+        proxy_type=mapping.get("proxy_type"),
+        proxy_user=mapping.get("proxy_user"),
+        proxy_pass=mapping.get("proxy_pass"),
     )
 
     if smtp.use_tls and smtp.use_ssl:
@@ -78,9 +84,10 @@ def load_config(config_path: str | Path) -> AppConfig:
 
     message = MessageSettings(
         subject=str(_require(message_raw, "subject")),
-        template=str(_require(message_raw, "template")),
+        template=str(message_raw.get("template")) if message_raw.get("template") else None,
         reply_to=(str(message_raw["reply_to"]) if message_raw.get("reply_to") else None),
         attachments=[str(item) for item in message_raw.get("attachments", [])],
+        random_attachments_folder=str(message_raw.get("random_attachments_folder")) if message_raw.get("random_attachments_folder") else None,
         inline_images={
             str(key): str(value)
             for key, value in (message_raw.get("inline_images") or {}).items()
@@ -97,7 +104,10 @@ def load_config(config_path: str | Path) -> AppConfig:
         dedupe_template_scope=bool(delivery_raw.get("dedupe_template_scope", True)),
         dedupe_history_days=int(delivery_raw.get("dedupe_history_days", 30)),
         scheduled_time=str(delivery_raw["scheduled_time"]) if delivery_raw.get("scheduled_time") else None,
-        rate_limit_per_minute=int(delivery_raw["rate_limit_per_minute"]) if delivery_raw.get("rate_limit_per_minute") else None,
+        rate_limit_per_minute=int(delivery_raw.get("rate_limit_per_minute")) if delivery_raw.get("rate_limit_per_minute") else None,
+        parallel_smtp_enabled=bool(delivery_raw.get("parallel_smtp_enabled", False)),
+        parallel_smtp_accounts=int(delivery_raw.get("parallel_smtp_accounts", 1)),
+        batch_interval_seconds=float(delivery_raw.get("batch_interval_seconds", 0.0)),
         retry_attempts=int(delivery_raw.get("retry_attempts", 1)),
         retry_backoff_seconds=float(delivery_raw.get("retry_backoff_seconds", 5.0)),
     )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
@@ -9,7 +9,7 @@ from .models import Recipient
 
 
 class TemplateRenderer:
-    def __init__(self, template_dir: str | Path) -> None:
+    def __init__(self, template_dir: Union[str, Path]) -> None:
         self.template_dir = Path(template_dir)
         self.environment = Environment(
             loader=FileSystemLoader(self.template_dir),
@@ -32,3 +32,9 @@ class TemplateRenderer:
         template = self.environment.get_template(template_name)
         merged_context = {**context, "recipient": {**recipient.data, "email": recipient.email}}
         return template.render(**merged_context)
+
+    def extract_template_variables(self, template_name: str) -> set[str]:
+        source_text = self.environment.loader.get_source(self.environment, template_name)[0]
+        import re
+        vars = set(re.findall(r"\{\{\s*([^\s\}]+)\s*\}\}", source_text))
+        return vars
