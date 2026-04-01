@@ -17,6 +17,81 @@ except ImportError:
 from .models import MessageSettings, Recipient, SMTPSettings
 
 
+_SOCKS_TYPE_MAP = {
+    "socks5": "SOCKS5",
+    "socks4": "SOCKS4",
+    "http": "HTTP",
+    "https": "HTTP",
+}
+
+
+def _make_socks_smtp(
+    host: str,
+    port: int,
+    timeout: float,
+    use_ssl: bool,
+    ssl_context: ssl.SSLContext,
+    proxy_type_str: str,
+    proxy_host: str,
+    proxy_port: int,
+    proxy_user: str | None,
+    proxy_pass: str | None,
+) -> smtplib.SMTP:
+    """Создаёт SMTP-соединение через SOCKS-прокси с передачей hostname (не IP).
+
+    Прямое использование socks.socksocket().set_proxy() + connect(hostname) гарантирует,
+    что DNS-резолвинг происходит на стороне прокси-сервера (rdns=True), а не на клиенте.
+    Это критично: если клиент резолвит hostname в IP и передаёт IP прокси, прокси
+    может вернуть 0x03 «Network unreachable», даже если hostname он обслуживает нормально.
+    """
+    if socks is None:
+        raise RuntimeError("Для поддержки прокси установите пакет PySocks: pip install PySocks")
+
+    socks_const = getattr(socks, _SOCKS_TYPE_MAP.get(proxy_type_str.lower(), ""), None)
+    if socks_const is None:
+        raise ValueError(f"Неизвестный тип прокси: {proxy_type_str}")
+
+    # Создаём socks-сокет и явно указываем прокси на экземпляре (thread-safe, без глобального патча)
+    raw_sock = socks.socksocket()
+    raw_sock.settimeout(timeout)
+    raw_sock.set_proxy(
+        proxy_type=socks_const,
+        addr=proxy_host,
+        port=proxy_port,
+        rdns=True,  # DNS резолвится на стороне прокси — hostname передаётся как есть
+        username=str(proxy_user) if proxy_user else None,
+        password=str(proxy_pass) if proxy_pass else None,
+    )
+    # Подключение с hostname — прокси сам резолвит DNS, нет локального getaddrinfo
+    raw_sock.connect((host, port))
+
+    if use_ssl:
+        ssl_sock = ssl_context.wrap_socket(raw_sock, server_hostname=host)
+        # SMTP_SSL с уже подключённым SSL-сокетом
+        server = smtplib.SMTP_SSL.__new__(smtplib.SMTP_SSL)
+        smtplib.SMTP.__init__(server)
+        server.sock = ssl_sock
+        server.file = ssl_sock.makefile("rb")
+        server._host = host
+        code, msg = server.getreply()
+        if code != 220:
+            server.close()
+            raise smtplib.SMTPConnectError(code, msg)
+        return server
+
+    # Обычный SMTP (STARTTLS) — передаём уже подключённый сокет
+    server = smtplib.SMTP.__new__(smtplib.SMTP)
+    smtplib.SMTP.__init__(server)
+    server.sock = raw_sock
+    server.file = raw_sock.makefile("rb")
+    server._host = host
+    code, msg = server.getreply()
+    if code != 220:
+        server.close()
+        raise smtplib.SMTPConnectError(code, msg)
+    return server
+
+
 class SMTPMailer:
     def __init__(self, settings: SMTPSettings) -> None:
         self.settings = settings
@@ -64,7 +139,6 @@ class SMTPMailer:
 
     def _open(self) -> smtplib.SMTP:
         timeout = self.settings.timeout_seconds
-        # Прокси поддержка
         proxy_host = getattr(self.settings, "proxy_host", None)
         proxy_port = getattr(self.settings, "proxy_port", None)
         proxy_type = getattr(self.settings, "proxy_type", None)
@@ -72,18 +146,21 @@ class SMTPMailer:
         proxy_pass = getattr(self.settings, "proxy_pass", None)
 
         if proxy_host and proxy_port and proxy_type:
-            if not socks:
-                raise RuntimeError("Для поддержки прокси установите пакет PySocks: pip install PySocks")
-            _type = {
-                "socks5": socks.SOCKS5,
-                "socks4": socks.SOCKS4,
-                "http": socks.HTTP,
-                "https": socks.HTTP,  # HTTP(S) реализуется одинаково
-            }.get(str(proxy_type).lower())
-            if not _type:
-                raise ValueError(f"Неизвестный тип прокси: {proxy_type}")
-            socks.set_default_proxy(_type, proxy_host, proxy_port, True if proxy_user else False, proxy_user, proxy_pass)
-            socket.socket = socks.socksocket
+            # Используем socks.socksocket напрямую — hostname передаётся в прокси «как есть»,
+            # DNS резолвится на стороне прокси-сервера. Это исправляет ошибку 0x03
+            # «Network unreachable», которая возникала, когда клиент резолвил IP локально.
+            return _make_socks_smtp(
+                host=str(self.settings.host),
+                port=int(self.settings.port),
+                timeout=float(timeout),
+                use_ssl=bool(self.settings.use_ssl),
+                ssl_context=ssl.create_default_context(),
+                proxy_type_str=str(proxy_type),
+                proxy_host=str(proxy_host),
+                proxy_port=int(proxy_port),
+                proxy_user=proxy_user or None,
+                proxy_pass=proxy_pass or None,
+            )
 
         if self.settings.use_ssl:
             return smtplib.SMTP_SSL(
