@@ -548,6 +548,7 @@ def run_campaign(
     reply_to_mode_override: str | None = None,
     stop_event: threading.Event | None = None,
     pause_event: threading.Event | None = None,
+    runtime_overrides_getter: Callable[[], dict[str, object]] | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> CampaignSummary:
     try:
@@ -566,10 +567,11 @@ def run_campaign(
     if subject_override:
         config.message.subject = str(subject_override).strip()
 
-    subject_mode_key = (subject_mode or "fixed").strip().lower()
-    subject_variants_list = [str(item).strip() for item in (subject_variants or []) if str(item).strip()]
-    if subject_mode_key == "random_campaign" and subject_variants_list:
-        config.message.subject = random.choice(subject_variants_list)
+    runtime_subject_mode_key = (subject_mode or "fixed").strip().lower()
+    runtime_subject_variants = [str(item).strip() for item in (subject_variants or []) if str(item).strip()]
+    runtime_subject_campaign_value = config.message.subject
+    if runtime_subject_mode_key == "random_campaign" and runtime_subject_variants:
+        runtime_subject_campaign_value = random.choice(runtime_subject_variants)
 
     text_mode = (body_text_mode or "fixed").strip().lower()
     text_variants = [str(item).strip() for item in (body_text_variants or []) if str(item).strip()]
@@ -613,9 +615,9 @@ def run_campaign(
 
     renderer = TemplateRenderer(templates_path)
     available_templates = renderer.list_templates()
-    template_name = template_override or config.message.template
-    if template_name not in available_templates:
-        raise CampaignError(f"Шаблон не найден: {template_name}")
+    runtime_template_name = template_override or config.message.template
+    if runtime_template_name not in available_templates:
+        raise CampaignError(f"Шаблон не найден: {runtime_template_name}")
 
     attachment_paths = _resolve_attachment_paths(base_dir, config.message.attachments)
     inline_image_paths = _resolve_inline_image_paths(base_dir, config.message.inline_images)
@@ -653,7 +655,7 @@ def run_campaign(
     if config.delivery.skip_previously_sent:
         dedupe_sent_set = _build_dedupe_sent_set(
             history_csv_path=history_csv_path,
-            template_name=template_name,
+            template_name=runtime_template_name,
             dedupe_template_scope=config.delivery.dedupe_template_scope,
             dedupe_history_days=config.delivery.dedupe_history_days,
         )
@@ -678,6 +680,48 @@ def run_campaign(
         runtime_smtp_accounts = new_accounts
         emit(f"🔄 SMTP-аккаунты обновлены: {len(runtime_smtp_accounts)}")
 
+    def _reload_template_and_subject_runtime() -> None:
+        nonlocal runtime_template_name, runtime_subject_mode_key, runtime_subject_variants, runtime_subject_campaign_value
+        if runtime_overrides_getter is None:
+            return
+        try:
+            options = runtime_overrides_getter() or {}
+        except Exception as error:  # noqa: BLE001
+            emit(f"⚠️ Не удалось обновить шаблон/тему: {error}")
+            return
+
+        new_template = str(options.get("template_override") or "").strip()
+        if new_template and new_template != runtime_template_name:
+            current_templates = renderer.list_templates()
+            if new_template in current_templates:
+                runtime_template_name = new_template
+                emit(f"🔄 Шаблон обновлён: {runtime_template_name}")
+            else:
+                emit(f"⚠️ Шаблон не найден, оставлен текущий: {new_template}")
+
+        new_subject_mode = str(options.get("subject_mode") or runtime_subject_mode_key).strip().lower()
+        if new_subject_mode not in {"fixed", "random_campaign", "random_recipient"}:
+            new_subject_mode = runtime_subject_mode_key
+
+        raw_variants = options.get("subject_variants")
+        if isinstance(raw_variants, list):
+            new_subject_variants = [str(item).strip() for item in raw_variants if str(item).strip()]
+        else:
+            new_subject_variants = list(runtime_subject_variants)
+
+        new_fixed_subject = str(options.get("subject_override") or "").strip()
+
+        runtime_subject_mode_key = new_subject_mode
+        runtime_subject_variants = new_subject_variants
+        if runtime_subject_mode_key == "random_campaign" and runtime_subject_variants:
+            runtime_subject_campaign_value = random.choice(runtime_subject_variants)
+            emit("🔄 Тема обновлена: режим random_campaign")
+        elif runtime_subject_mode_key == "fixed" and new_fixed_subject:
+            runtime_subject_campaign_value = new_fixed_subject
+            emit("🔄 Тема обновлена: фиксированная")
+        elif runtime_subject_mode_key == "random_recipient":
+            emit("🔄 Тема обновлена: режим random_recipient")
+
     def _wait_if_paused_or_stopped() -> bool:
         announced = False
         while pause_event is not None and pause_event.is_set():
@@ -689,6 +733,7 @@ def run_campaign(
             time.sleep(0.2)
         if announced:
             _reload_smtp_accounts_runtime()
+            _reload_template_and_subject_runtime()
             emit("▶ Рассылка продолжена")
         return not (stop_event is not None and stop_event.is_set())
 
@@ -745,8 +790,10 @@ def run_campaign(
 
         selected_reply_to = random.choice(reply_to_candidates) if reply_to_candidates else config.message.reply_to
         message_settings = _copy_message_settings(config.message, selected_reply_to)
-        if subject_mode_key == "random_recipient" and subject_variants_list:
-            message_settings.subject = random.choice(subject_variants_list)
+        if runtime_subject_mode_key == "random_recipient" and runtime_subject_variants:
+            message_settings.subject = random.choice(runtime_subject_variants)
+        else:
+            message_settings.subject = runtime_subject_campaign_value
 
         smtp_account = local_mailer.settings.from_email
         recipient_key = recipient.email.strip().lower()
@@ -759,12 +806,12 @@ def run_campaign(
             }
 
         html_body = renderer.render(
-            template_name=template_name,
+            template_name=runtime_template_name,
             recipient=recipient,
             context={
                 **config.content,
                 **recipient_text_context,
-                "subject": config.message.subject,
+                "subject": message_settings.subject,
                 "inline_images": _build_inline_context(inline_image_paths),
                 "smtp": {
                     "host": local_mailer.settings.host,
@@ -846,7 +893,7 @@ def run_campaign(
         "Старт кампании: dry_run=%s, recipients=%s, template=%s, attachments=%s, inline_images=%s, smtp_accounts=%s, dedupe=%s, reply_to_mode=%s, reply_to_candidates=%s, config_reply_to=%s",
         dry_run,
         len(recipients),
-        template_name,
+        runtime_template_name,
         len(attachment_paths),
         len(inline_image_paths),
         len(runtime_smtp_accounts),
@@ -875,7 +922,7 @@ def run_campaign(
                     "recipient": recipient.email,
                     "status": "skipped-duplicate",
                     "subject": config.message.subject,
-                    "template": template_name,
+                    "template": runtime_template_name,
                     "smtp_account": "",
                     "proxy": "disabled" if not use_proxy else "n/a",
                     "reply_to": config.message.reply_to or "",
@@ -922,7 +969,7 @@ def run_campaign(
                             "recipient": result["recipient"],
                             "status": result["status"],
                             "subject": result["subject"],
-                            "template": template_name,
+                            "template": runtime_template_name,
                             "smtp_account": result["smtp_account"],
                             "proxy": result["proxy"],
                             "reply_to": result["reply_to"],
@@ -959,7 +1006,7 @@ def run_campaign(
                     "recipient": result["recipient"],
                     "status": result["status"],
                     "subject": result["subject"],
-                    "template": template_name,
+                    "template": runtime_template_name,
                     "smtp_account": result["smtp_account"],
                     "proxy": result["proxy"],
                     "reply_to": result["reply_to"],

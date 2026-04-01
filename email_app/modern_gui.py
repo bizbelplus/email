@@ -1695,6 +1695,7 @@ class ModernEmailAppGUI:
                 reply_to_mode_override=self.replyto_mode_var.get().strip() or None,
                 stop_event=self._stop_event,
                 pause_event=self._pause_event,
+                runtime_overrides_getter=self._build_runtime_overrides_getter(),
                 progress_callback=self._make_progress_callback(),
             )
             self.queue.put(("log", f"История CSV: {summary.history_csv}"))
@@ -1709,6 +1710,43 @@ class ModernEmailAppGUI:
             self.queue.put(("error", str(error)))
         except Exception as error:  # noqa: BLE001
             self.queue.put(("error", f"Неожиданная ошибка: {error}"))
+
+    def _build_runtime_overrides_getter(self):
+        """Возвращает callback для runtime-обновления шаблона/темы при снятии паузы."""
+
+        def _load_subjects_from_file(subjects_rel_path: str) -> list[str]:
+            items: list[str] = []
+            rel = str(subjects_rel_path or "").strip()
+            if not rel:
+                return items
+            path = (self.base_dir / rel)
+            if not path.exists():
+                return items
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        text = line.strip()
+                        if text and not text.startswith("#"):
+                            items.append(text)
+            except Exception:
+                return []
+            return items
+
+        def _getter() -> dict[str, object]:
+            template_override = (self.template_var.get() or "").strip() or None
+            subjects_rel = (self.subjects_file_var.get() or "").strip()
+            subject_variants = _load_subjects_from_file(subjects_rel)
+            subject_mode = "fixed"
+            if subject_variants:
+                subject_mode = "random_recipient" if self.subjects_mode_var.get() == "random" else "random_campaign"
+
+            return {
+                "template_override": template_override,
+                "subject_mode": subject_mode,
+                "subject_variants": subject_variants,
+            }
+
+        return _getter
 
     def _run_queue_worker(self, queue_path: Path) -> None:
         try:
