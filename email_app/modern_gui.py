@@ -9,6 +9,20 @@ import sys
 import threading
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from tkinter import ttk
+
+import yaml
+
+from .smtp_domains import (
+    CONN_LABELS,
+    CONN_LABEL_TO_INT,
+    _flags_to_conn_type,
+    _conn_type_to_flags,
+    _flags_to_label,
+    load_domains,
+    parse_smtp_domains_file,
+    save_smtp_domains_file,
+)
 
 from .campaign_queue import (
     CampaignQueueError,
@@ -32,6 +46,8 @@ from .tinymce_editor import RichEditorError, RichTemplateEditorServer
 
 
 class ModernEmailAppGUI:
+    DEFAULT_CONFIG_PATH = "config/settings.yaml"
+
     def __init__(self, ctk: object, base_dir: Path, preset_path: Path | None = None) -> None:
         self.ctk = ctk
         self.base_dir = base_dir
@@ -55,12 +71,19 @@ class ModernEmailAppGUI:
         # Theme preference
         self.theme_var = ctk.StringVar(value="dark")
 
-        self.config_var = ctk.StringVar(value="config/settings.yaml")
+        self.config_var = ctk.StringVar(value=self.DEFAULT_CONFIG_PATH)
         self.recipients_var = ctk.StringVar(value="recipients.csv")
         self.templates_var = ctk.StringVar(value="templates")
+        self.smtp_accounts_file_var = ctk.StringVar(value="")
         self.template_var = ctk.StringVar(value="")
         self.attachments_folder_var = ctk.StringVar(value="")
         self.proxy_file_var = ctk.StringVar(value="config/proxies.txt")
+        self.subjects_file_var = ctk.StringVar(value="")
+        self._subjects_list: list[str] = []
+        self.texts_file_var = ctk.StringVar(value="")
+        self.text_mode_var = ctk.StringVar(value="Фиксированный")
+        self.text_choice_var = ctk.StringVar(value="")
+        self._texts_list: list[str] = []
         self.external_editor_path = ctk.StringVar(value="")
         self.proxy_enabled_var = ctk.BooleanVar(value=True)
         self.live_preview_var = ctk.BooleanVar(value=True)
@@ -70,7 +93,7 @@ class ModernEmailAppGUI:
         self.replyto_count_var = ctk.StringVar(value="0")
         self.delay_var = ctk.StringVar(value="0")
         self.rate_limit_var = ctk.StringVar(value="")
-        self.retry_attempts_var = ctk.StringVar(value="1")
+        self.retry_attempts_var = ctk.StringVar(value="3")
         self.parallel_smtp_var = ctk.StringVar(value="1")
         self.parallel_enabled_var = ctk.BooleanVar(value=False)
         self.batch_interval_var = ctk.StringVar(value="0")
@@ -78,18 +101,31 @@ class ModernEmailAppGUI:
         self.dry_run_var = ctk.BooleanVar(value=True)
         self.status_var = ctk.StringVar(value="✓ Готово к запуску")
         self.editor_live_job = None
+        # Отслеживание прогресса кампании
+        self._stop_event: threading.Event = threading.Event()
+        self._campaign_total: int = 0
+        self._campaign_sent: int = 0
+        self._campaign_failed: int = 0
+        self._campaign_start_time: float | None = None
+        self._recipients_count: int = 0
+        self._selected_message_text: str | None = None
+        self._campaign_failed_recipients: list[dict] = []  # [{email, reason}]
 
         self._build()
+        self._setup_mousewheel_scrolling()
         self._on_theme_change(self.theme_var.get())
+        self._load_last_session()
         if self.current_preset_path:
             self._load_preset(self.current_preset_path, silent=True)
         self._refresh_templates()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(150, self._poll_queue)
 
     def _build(self) -> None:
         main_container = self.ctk.CTkScrollableFrame(self.root, corner_radius=0)
         main_container.pack(fill="both", expand=True)
         main_container.grid_columnconfigure(0, weight=1)
+        self.main_container = main_container
 
         # === ЗАГОЛОВОК С ПЕРЕКЛЮЧАТЕЛЕМ ТЕМЫ ===
         header = self.ctk.CTkFrame(main_container, fg_color=("gray90", "gray15"), corner_radius=12)
@@ -124,9 +160,104 @@ class ModernEmailAppGUI:
         config_section.pack(fill="x", padx=16, pady=8)
         self.ctk.CTkLabel(config_section, text="📋 Конфигурация", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 8))
 
-        self._add_path_row(config_section, 0, "Конфиг", self.config_var, self._select_config)
+        config_info = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        config_info.pack(fill="x", padx=12, pady=(0, 8))
+        self.ctk.CTkLabel(
+            config_info,
+            text=f"Используется фиксированный конфиг: {self.DEFAULT_CONFIG_PATH}",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w")
+
         self._add_path_row(config_section, 1, "Получатели", self.recipients_var, self._select_recipients)
+        _rcp_info = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        _rcp_info.pack(fill="x", padx=14, pady=(0, 4))
+        self.recipients_count_label = self.ctk.CTkLabel(_rcp_info, text="", font=("", 10), text_color=("gray40", "gray60"))
+        self.recipients_count_label.pack(side="left")
+        self.eta_estimate_label = self.ctk.CTkLabel(_rcp_info, text="", font=("", 10), text_color=("gray40", "gray60"))
+        self.eta_estimate_label.pack(side="left", padx=(16, 0))
         self._add_path_row(config_section, 2, "Шаблоны", self.templates_var, self._select_templates)
+        self._add_path_row(config_section, 3, "SMTP аккаунты", self.smtp_accounts_file_var, self._select_smtp_accounts_file)
+        self._add_path_row(config_section, 4, "Темы писем", self.subjects_file_var, self._select_subjects_file)
+        self._add_path_row(config_section, 5, "Тексты писем", self.texts_file_var, self._select_texts_file)
+
+        text_mode_row = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        text_mode_row.pack(fill="x", padx=14, pady=(0, 4))
+        text_mode_row.grid_columnconfigure(2, weight=1)
+        self.ctk.CTkLabel(text_mode_row, text="Режим текста:").grid(row=0, column=0, sticky="w")
+        self.ctk.CTkComboBox(
+            text_mode_row,
+            values=["Фиксированный", "Случайный (на кампанию)", "Случайный (на получателя)"],
+            variable=self.text_mode_var,
+            width=230,
+            command=lambda _value: self._update_text_mode_ui(),
+        ).grid(row=0, column=1, sticky="w", padx=(8, 8))
+        self.text_choice_combo = self.ctk.CTkComboBox(
+            text_mode_row,
+            values=[""],
+            variable=self.text_choice_var,
+            width=520,
+        )
+        self.text_choice_combo.grid(row=0, column=2, sticky="ew")
+        self._texts_count_label = self.ctk.CTkLabel(text_mode_row, text="")
+        self._texts_count_label.grid(row=0, column=3, sticky="e", padx=(8, 0))
+
+        # === REPLY-TO / PROXY (в блоке Конфигурация) ===
+        replyto_section = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        replyto_section.pack(fill="x", padx=12, pady=(6, 8))
+        self.ctk.CTkLabel(replyto_section, text="Reply-To (адрес для ответов):").grid(row=0, column=0, sticky="w")
+        self.replyto_var = self.ctk.StringVar(value="")
+        self.replyto_combo = self.ctk.CTkComboBox(replyto_section, variable=self.replyto_var, values=[], width=320)
+        self.replyto_combo.grid(row=0, column=1, padx=(8, 8))
+        self.ctk.CTkButton(replyto_section, text="Загрузить txt", command=self._load_replyto_txt).grid(row=0, column=2)
+        self.ctk.CTkLabel(replyto_section, textvariable=self.replyto_count_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4,0))
+
+        replyto_mode_section = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        replyto_mode_section.pack(fill="x", padx=12, pady=(0,8))
+        self.ctk.CTkLabel(replyto_mode_section, text="Режим Reply-To:").grid(row=0, column=0, sticky="w")
+        self.ctk.CTkRadioButton(replyto_mode_section, text="Случайный для каждого", variable=self.replyto_mode_var, value="random").grid(row=0, column=1, padx=4)
+        self.ctk.CTkRadioButton(replyto_mode_section, text="Фиксированный выбранный", variable=self.replyto_mode_var, value="fixed").grid(row=0, column=2, padx=4)
+
+        proxy_section = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        proxy_section.pack(fill="x", padx=12, pady=(0, 8))
+        self.ctk.CTkCheckBox(proxy_section, text="Использовать прокси", variable=self.proxy_enabled_var, onvalue=True, offvalue=False).pack(anchor="w")
+        proxy_file_row = self.ctk.CTkFrame(proxy_section, fg_color="transparent")
+        proxy_file_row.pack(fill="x", pady=(6, 0))
+        proxy_file_row.grid_columnconfigure(1, weight=1)
+        self.ctk.CTkLabel(proxy_file_row, text="Файл прокси:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkEntry(proxy_file_row, textvariable=self.proxy_file_var).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.ctk.CTkButton(proxy_file_row, text="📁", width=36, command=self._select_proxy_file).grid(row=0, column=2)
+
+        # Кнопка менеджера SMTP-доменов
+        domains_btn_frame = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        domains_btn_frame.pack(fill="x", padx=12, pady=(0, 10))
+        self.ctk.CTkButton(
+            domains_btn_frame,
+            text="🗂 Менеджер SMTP-доменов",
+            command=self._open_smtp_domains_manager,
+            width=220,
+            height=30,
+            fg_color=("gray70", "gray30"),
+        ).pack(side="left")
+        self.ctk.CTkButton(
+            domains_btn_frame,
+            text="🧩 Переменные {{...}}",
+            command=self._open_content_variables_manager,
+            width=210,
+            height=30,
+            fg_color=("gray70", "gray30"),
+        ).pack(side="left", padx=(8, 0))
+        self.ctk.CTkButton(
+            domains_btn_frame,
+            text="⚙️ Мастер настройки",
+            command=self._open_settings_wizard,
+            width=190,
+            height=30,
+            fg_color=("gray70", "gray30"),
+        ).pack(side="left", padx=(8, 0))
+        self._subjects_count_label = self.ctk.CTkLabel(domains_btn_frame, text="")
+        self._subjects_count_label.pack(side="left", padx=(16, 0))
+        self._update_text_mode_ui()
 
         # === ШАБЛОН И ОПЦИИ (Раздел 2) ===
         template_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
@@ -156,6 +287,12 @@ class ModernEmailAppGUI:
         self.template_vars_label = self.ctk.CTkLabel(template_meta_row, text="Переменных в шаблоне: 0")
         self.template_vars_label.grid(row=0, column=0, sticky="w")
         self.ctk.CTkButton(template_meta_row, text="Проверить переменные", command=self._check_template_variables).grid(row=0, column=1, padx=(8,0))
+        self.ctk.CTkButton(
+            template_meta_row,
+            text="❔ Подсказка {{...}}",
+            command=self._show_template_variables_hint,
+            fg_color=("gray70", "gray30"),
+        ).grid(row=0, column=2, padx=(8, 0))
 
         # Сетка опций: delay, rate limit, retry
         options_frame = self.ctk.CTkFrame(template_section, fg_color="transparent")
@@ -202,32 +339,6 @@ class ModernEmailAppGUI:
             offvalue=False,
         ).pack(anchor="w")
 
-        # === REPLY-TO (новый блок) ===
-        replyto_section = self.ctk.CTkFrame(template_section, fg_color="transparent")
-        replyto_section.pack(fill="x", padx=12, pady=8)
-        self.ctk.CTkLabel(replyto_section, text="Reply-To (адрес для ответов):").grid(row=0, column=0, sticky="w")
-        self.replyto_var = self.ctk.StringVar(value="")
-        self.replyto_combo = self.ctk.CTkComboBox(replyto_section, variable=self.replyto_var, values=[], width=320)
-        self.replyto_combo.grid(row=0, column=1, padx=(8, 8))
-        self.ctk.CTkButton(replyto_section, text="Загрузить txt", command=self._load_replyto_txt).grid(row=0, column=2)
-        self.ctk.CTkLabel(replyto_section, textvariable=self.replyto_count_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4,0))
-
-        replyto_mode_section = self.ctk.CTkFrame(template_section, fg_color="transparent")
-        replyto_mode_section.pack(fill="x", padx=12, pady=(0,8))
-        self.ctk.CTkLabel(replyto_mode_section, text="Режим Reply-To:").grid(row=0, column=0, sticky="w")
-        self.ctk.CTkRadioButton(replyto_mode_section, text="Случайный для каждого", variable=self.replyto_mode_var, value="random").grid(row=0, column=1, padx=4)
-        self.ctk.CTkRadioButton(replyto_mode_section, text="Фиксированный выбранный", variable=self.replyto_mode_var, value="fixed").grid(row=0, column=2, padx=4)
-
-        proxy_section = self.ctk.CTkFrame(template_section, fg_color="transparent")
-        proxy_section.pack(fill="x", padx=12, pady=4)
-        self.ctk.CTkCheckBox(proxy_section, text="Использовать прокси", variable=self.proxy_enabled_var, onvalue=True, offvalue=False).pack(anchor="w")
-        proxy_file_row = self.ctk.CTkFrame(proxy_section, fg_color="transparent")
-        proxy_file_row.pack(fill="x", pady=(6, 0))
-        proxy_file_row.grid_columnconfigure(1, weight=1)
-        self.ctk.CTkLabel(proxy_file_row, text="Файл прокси:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.ctk.CTkEntry(proxy_file_row, textvariable=self.proxy_file_var).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-        self.ctk.CTkButton(proxy_file_row, text="📁", width=36, command=self._select_proxy_file).grid(row=0, column=2)
-
         # === ДЕЙСТВИЯ (Раздел 3) ===
         actions_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
         actions_section.pack(fill="x", padx=16, pady=8)
@@ -258,13 +369,41 @@ class ModernEmailAppGUI:
         # Дополнительные кнопки на второй строке
         buttons_frame2 = self.ctk.CTkFrame(actions_section, fg_color="transparent")
         buttons_frame2.pack(fill="x", padx=12, pady=(0, 8))
-        for i in range(3):
+        for i in range(6):
             buttons_frame2.grid_columnconfigure(i, weight=1)
 
+        self.ctk.CTkButton(
+            buttons_frame2,
+            text="⏹ Стоп",
+            command=self._stop_campaign,
+            height=32,
+            font=("", 10),
+            fg_color=("#c0392b", "#7b241c"),
+            hover_color=("#e74c3c", "#922b21"),
+        ).grid(row=0, column=0, sticky="ew", padx=4)
+
+        self.ctk.CTkButton(
+            buttons_frame2,
+            text="📦 Тест SMTP (все)",
+            command=self._test_all_smtp_accounts,
+            height=32,
+            font=("", 10),
+            fg_color=("gray70", "gray30"),
+        ).grid(row=0, column=1, sticky="ew", padx=4)
+
+        self.ctk.CTkButton(
+            buttons_frame2,
+            text="🧪 Тест прокси",
+            command=self._test_proxies,
+            height=32,
+            font=("", 10),
+            fg_color=("gray70", "gray30"),
+        ).grid(row=0, column=2, sticky="ew", padx=4)
+
         button_specs2 = [
-            ("📂 Очередь JSON", self._run_queue_dialog, 0),
-            ("💾 Экспорт JSON/CSV", self._export_queue_dialog, 1),
-            ("📂 Загрузить пресет", self._load_preset_dialog, 2),
+            ("📂 Очередь JSON", self._run_queue_dialog, 3),
+            ("💾 Экспорт JSON/CSV", self._export_queue_dialog, 4),
+            ("📂 Загрузить пресет", self._load_preset_dialog, 5),
         ]
         for label, command, col in button_specs2:
             self.ctk.CTkButton(
@@ -276,15 +415,48 @@ class ModernEmailAppGUI:
                 fg_color=("gray70", "gray30"),
             ).grid(row=0, column=col, sticky="ew", padx=4)
 
-        # === СТАТУС (Раздел 4) ===
-        status_section = self.ctk.CTkFrame(main_container, fg_color=("gray88", "gray25"), corner_radius=12)
-        status_section.pack(fill="x", padx=16, pady=8)
+        # === ПРОГРЕСС (Раздел 4) ===
+        progress_section = self.ctk.CTkFrame(main_container, fg_color=("gray88", "gray25"), corner_radius=12)
+        progress_section.pack(fill="x", padx=16, pady=8)
+
+        pb_row = self.ctk.CTkFrame(progress_section, fg_color="transparent")
+        pb_row.pack(fill="x", padx=12, pady=(10, 4))
+        pb_row.grid_columnconfigure(1, weight=1)
+        self.ctk.CTkLabel(pb_row, text="Прогресс:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.progress_bar = self.ctk.CTkProgressBar(pb_row, mode="determinate")
+        self.progress_bar.set(0)
+        self.progress_bar.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.progress_pct_label = self.ctk.CTkLabel(pb_row, text="0%  (0/0)", width=100)
+        self.progress_pct_label.grid(row=0, column=2, sticky="e")
+
+        counters_row = self.ctk.CTkFrame(progress_section, fg_color="transparent")
+        counters_row.pack(fill="x", padx=12, pady=(0, 4))
+        self.sent_label = self.ctk.CTkLabel(counters_row, text="✅ Отправлено: 0")
+        self.sent_label.pack(side="left", padx=(0, 16))
+        self.failed_label = self.ctk.CTkLabel(counters_row, text="❌ Ошибок: 0")
+        self.failed_label.pack(side="left", padx=(0, 16))
+        self.remaining_label = self.ctk.CTkLabel(counters_row, text="⏳ Осталось: —")
+        self.remaining_label.pack(side="left", padx=(0, 16))
+        self.eta_label = self.ctk.CTkLabel(counters_row, text="⏱ ETA: —")
+        self.eta_label.pack(side="left")
+
+        self.errors_btn = self.ctk.CTkButton(
+            counters_row,
+            text="🔍 Список ошибок",
+            width=150,
+            state="disabled",
+            fg_color=("gray75", "gray35"),
+            hover_color=("gray65", "gray45"),
+            command=self._show_failed_window,
+        )
+        self.errors_btn.pack(side="right")
+
         self.ctk.CTkLabel(
-            status_section,
+            progress_section,
             textvariable=self.status_var,
             anchor="w",
             font=("", 11),
-        ).pack(fill="x", padx=12, pady=12)
+        ).pack(fill="x", padx=12, pady=(0, 10))
 
         # === ЛОГ (Раздел 5) ===
         log_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
@@ -294,9 +466,64 @@ class ModernEmailAppGUI:
         log_buttons = self.ctk.CTkFrame(log_section, fg_color="transparent")
         log_buttons.pack(fill="x", padx=12, pady=(0, 8))
         self.ctk.CTkButton(log_buttons, text="🗑️  Очистить лог", width=120, command=self._clear_log).pack(side="left")
+        self.ctk.CTkButton(log_buttons, text="📂 Открыть лог-файл", width=140, command=self._open_log_file, fg_color=("gray70", "gray30")).pack(side="left", padx=8)
+        self.ctk.CTkButton(log_buttons, text="📁 Папка проекта", width=130, command=self._open_project_folder, fg_color=("gray70", "gray30")).pack(side="left")
 
         self.log_widget = self.ctk.CTkTextbox(log_section, wrap="word", font=("Courier", 10))
         self.log_widget.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+    def _setup_mousewheel_scrolling(self) -> None:
+        """Явно включает прокрутку колёсиком для основного CTkScrollableFrame."""
+        canvas = getattr(getattr(self, "main_container", None), "_parent_canvas", None)
+        if canvas is None:
+            return
+
+        def _is_inside_main_container(widget) -> bool:
+            current = widget
+            while current is not None:
+                if current is self.main_container:
+                    return True
+                current = getattr(current, "master", None)
+            return False
+
+        def _on_mousewheel(event):
+            widget = getattr(event, "widget", None)
+            if widget is None or not _is_inside_main_container(widget):
+                return
+            delta = int(getattr(event, "delta", 0))
+            if delta == 0:
+                return
+            # На macOS delta обычно маленький и событий много — ограничиваем шаг.
+            magnitude = max(1, min(3, abs(delta) // 60 if abs(delta) > 1 else 1))
+            step = -magnitude if delta > 0 else magnitude
+            try:
+                canvas.yview_scroll(step, "units")
+            except Exception:
+                return
+
+        def _on_mousewheel_linux_up(event):
+            widget = getattr(event, "widget", None)
+            if widget is None or not _is_inside_main_container(widget):
+                return
+            try:
+                canvas.yview_scroll(-1, "units")
+            except Exception:
+                return
+
+        def _on_mousewheel_linux_down(event):
+            widget = getattr(event, "widget", None)
+            if widget is None or not _is_inside_main_container(widget):
+                return
+            try:
+                canvas.yview_scroll(1, "units")
+            except Exception:
+                return
+
+        # macOS / Windows
+        self.root.bind_all("<MouseWheel>", _on_mousewheel, add="+")
+        # Linux (на случай запуска вне macOS)
+        self.root.bind_all("<Button-4>", _on_mousewheel_linux_up, add="+")
+        self.root.bind_all("<Button-5>", _on_mousewheel_linux_down, add="+")
 
     def _add_path_row(self, parent: object, row: int, label: str, variable: object, command: object) -> None:
         row_frame = self.ctk.CTkFrame(parent, fg_color="transparent")
@@ -310,21 +537,449 @@ class ModernEmailAppGUI:
         self.ctk.CTkButton(row_frame, text="📁", command=command).grid(row=0, column=2)
 
     def _select_config(self) -> None:
+        messagebox.showinfo(
+            "Конфиг",
+            f"В упрощённом режиме используется только {self.DEFAULT_CONFIG_PATH}",
+        )
+
+    def _open_settings_wizard(self) -> None:
+        """Визуальный мастер заполнения settings.yaml без ручного редактирования файлов."""
+        config_path = self.base_dir / self.config_var.get()
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            raw = {}
+
+        smtp_raw = dict(raw.get("smtp") or {})
+        message_raw = dict(raw.get("message") or {})
+        delivery_raw = dict(raw.get("delivery") or {})
+
+        win = self.ctk.CTkToplevel(self.root)
+        win.title("⚙️ Мастер настройки")
+        win.geometry("900x760")
+        win.grab_set()
+
+        container = self.ctk.CTkScrollableFrame(win)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # SMTP
+        smtp_section = self.ctk.CTkFrame(container, fg_color=("gray95", "gray20"), corner_radius=10)
+        smtp_section.pack(fill="x", pady=(0, 10))
+        self.ctk.CTkLabel(smtp_section, text="SMTP", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(10, 6))
+
+        smtp_host_var = self.ctk.StringVar(value=str(smtp_raw.get("host", "")))
+        smtp_port_var = self.ctk.StringVar(value=str(smtp_raw.get("port", "587")))
+        smtp_user_var = self.ctk.StringVar(value=str(smtp_raw.get("username", "")))
+        smtp_pass_var = self.ctk.StringVar(value=str(smtp_raw.get("password", "")))
+        smtp_from_email_var = self.ctk.StringVar(value=str(smtp_raw.get("from_email", "")))
+        smtp_from_name_var = self.ctk.StringVar(value=str(smtp_raw.get("from_name", "")))
+        smtp_use_tls_var = self.ctk.BooleanVar(value=bool(smtp_raw.get("use_tls", True)))
+        smtp_use_ssl_var = self.ctk.BooleanVar(value=bool(smtp_raw.get("use_ssl", False)))
+        smtp_timeout_var = self.ctk.StringVar(value=str(smtp_raw.get("timeout_seconds", "30")))
+        smtp_accounts_file_var = self.ctk.StringVar(value=str(smtp_raw.get("accounts_file", self.smtp_accounts_file_var.get() or "")))
+        smtp_proxy_file_var = self.ctk.StringVar(value=str(smtp_raw.get("proxy_file", self.proxy_file_var.get() or "config/proxies.txt")))
+        smtp_mode_var = self.ctk.StringVar(value="bulk" if smtp_accounts_file_var.get().strip() else "single")
+
+        def _row(parent: object, label: str, var: object, show: str | None = None) -> None:
+            fr = self.ctk.CTkFrame(parent, fg_color="transparent")
+            fr.pack(fill="x", padx=12, pady=4)
+            fr.grid_columnconfigure(1, weight=1)
+            self.ctk.CTkLabel(fr, text=label, width=180, anchor="w").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            kwargs = {"textvariable": var}
+            if show is not None:
+                kwargs["show"] = show
+            self.ctk.CTkEntry(fr, **kwargs).grid(row=0, column=1, sticky="ew")
+
+        _row(smtp_section, "Хост", smtp_host_var)
+        _row(smtp_section, "Порт", smtp_port_var)
+        _row(smtp_section, "Логин", smtp_user_var)
+        _row(smtp_section, "Пароль", smtp_pass_var, show="*")
+        _row(smtp_section, "From Email", smtp_from_email_var)
+        _row(smtp_section, "From Name", smtp_from_name_var)
+        _row(smtp_section, "Timeout (сек)", smtp_timeout_var)
+
+        mode_row = self.ctk.CTkFrame(smtp_section, fg_color="transparent")
+        mode_row.pack(fill="x", padx=12, pady=(4, 4))
+        self.ctk.CTkLabel(mode_row, text="Режим SMTP", width=180, anchor="w").pack(side="left")
+        self.ctk.CTkRadioButton(mode_row, text="Один аккаунт", variable=smtp_mode_var, value="single").pack(side="left", padx=(0, 8))
+        self.ctk.CTkRadioButton(mode_row, text="Пакет аккаунтов (TXT/CSV)", variable=smtp_mode_var, value="bulk").pack(side="left")
+
+        self.ctk.CTkLabel(
+            smtp_section,
+            text="Подсказка: в режиме «Пакет аккаунтов» поля Хост/Логин/Пароль не обязательны — берутся из файла.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", padx=12, pady=(0, 6))
+
+        flags_row = self.ctk.CTkFrame(smtp_section, fg_color="transparent")
+        flags_row.pack(fill="x", padx=12, pady=(4, 8))
+        self.ctk.CTkCheckBox(flags_row, text="STARTTLS", variable=smtp_use_tls_var, onvalue=True, offvalue=False).pack(side="left")
+        self.ctk.CTkCheckBox(flags_row, text="SSL", variable=smtp_use_ssl_var, onvalue=True, offvalue=False).pack(side="left", padx=(12, 0))
+
+        # accounts/proxy files
+        smtp_accounts_info_var = self.ctk.StringVar(value="")
+
+        def _load_accounts_with_wizard_defaults(accounts_path: Path) -> list[object]:
+            from .config import _load_smtp_accounts, _load_smtp_accounts_txt
+            from .smtp_domains import load_domains as _load_domains
+
+            if accounts_path.suffix.lower() == ".txt":
+                port_text = smtp_port_var.get().strip()
+                timeout_text = smtp_timeout_var.get().strip()
+                defaults = {
+                    "host": smtp_host_var.get().strip() or None,
+                    "port": int(port_text) if port_text else None,
+                    "from_name": smtp_from_name_var.get().strip() or None,
+                    "use_tls": bool(smtp_use_tls_var.get()),
+                    "use_ssl": bool(smtp_use_ssl_var.get()),
+                    "timeout_seconds": int(timeout_text or "30"),
+                }
+                return _load_smtp_accounts_txt(
+                    accounts_path,
+                    defaults,
+                    domains_db=_load_domains(self.base_dir),
+                    base_dir=self.base_dir,
+                )
+            return _load_smtp_accounts(accounts_path)
+
+        def _count_non_comment_lines(accounts_path: Path) -> int:
+            count = 0
+            with accounts_path.open("r", encoding="utf-8-sig") as handle:
+                for line in handle:
+                    text = line.strip()
+                    if text and not text.startswith("#"):
+                        count += 1
+            return count
+
+        def _refresh_accounts_info() -> None:
+            value = smtp_accounts_file_var.get().strip()
+            if not value:
+                smtp_accounts_info_var.set("")
+                return
+            accounts_path = (self.base_dir / value).resolve()
+            if not accounts_path.exists():
+                smtp_accounts_info_var.set("⚠️ Файл не найден")
+                return
+            if self._looks_like_smtp_domains_file(accounts_path):
+                smtp_accounts_info_var.set("⚠️ Это smtp_domains.txt (файл доменов), выберите файл аккаунтов")
+                return
+            try:
+                accounts = _load_accounts_with_wizard_defaults(accounts_path)
+                smtp_accounts_info_var.set(f"✅ Найдено аккаунтов: {len(accounts)}")
+            except Exception as error:  # noqa: BLE001
+                try:
+                    rough_count = _count_non_comment_lines(accounts_path)
+                    if rough_count > 0:
+                        smtp_accounts_info_var.set(
+                            f"⚠️ Частичная проверка: строк={rough_count} (есть неразобранные записи)"
+                        )
+                    else:
+                        smtp_accounts_info_var.set("⚠️ Файл пуст")
+                except Exception:
+                    smtp_accounts_info_var.set(f"⚠️ Ошибка файла: {error}")
+
+        smtp_accounts_row = self.ctk.CTkFrame(smtp_section, fg_color="transparent")
+        smtp_accounts_row.pack(fill="x", padx=12, pady=4)
+        smtp_accounts_row.grid_columnconfigure(1, weight=1)
+        self.ctk.CTkLabel(smtp_accounts_row, text="Файл SMTP аккаунтов", width=180, anchor="w").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkEntry(smtp_accounts_row, textvariable=smtp_accounts_file_var).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+
+        def _pick_accounts_file() -> None:
+            p = filedialog.askopenfilename(
+                initialdir=self.base_dir,
+                filetypes=[("TXT/CSV", "*.txt *.csv"), ("Все", "*.*")],
+            )
+            if p:
+                picked_path = Path(p)
+                if self._looks_like_smtp_domains_file(picked_path):
+                    messagebox.showwarning(
+                        "SMTP аккаунты",
+                        "Вы выбрали файл SMTP-доменов (smtp_domains.txt).\n"
+                        "Для поля «Файл SMTP аккаунтов» нужен файл с логинами/паролями:\n"
+                        "- username:password\n"
+                        "- или host|port|username|password|from_email|from_name",
+                        parent=win,
+                    )
+                    return
+                smtp_accounts_file_var.set(self._relative(Path(p)))
+                _refresh_accounts_info()
+
+        self.ctk.CTkButton(smtp_accounts_row, text="📁", width=36, command=_pick_accounts_file).grid(row=0, column=2)
+        self.ctk.CTkLabel(
+            smtp_accounts_row,
+            textvariable=smtp_accounts_info_var,
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).grid(row=1, column=1, sticky="w", pady=(4, 0))
+
+        proxy_file_row = self.ctk.CTkFrame(smtp_section, fg_color="transparent")
+        proxy_file_row.pack(fill="x", padx=12, pady=4)
+        proxy_file_row.grid_columnconfigure(1, weight=1)
+        self.ctk.CTkLabel(proxy_file_row, text="Файл прокси", width=180, anchor="w").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkEntry(proxy_file_row, textvariable=smtp_proxy_file_var).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+
+        def _pick_proxy_file() -> None:
+            p = filedialog.askopenfilename(
+                initialdir=self.base_dir,
+                filetypes=[("TXT", "*.txt"), ("Все", "*.*")],
+            )
+            if p:
+                smtp_proxy_file_var.set(self._relative(Path(p)))
+
+        self.ctk.CTkButton(proxy_file_row, text="📁", width=36, command=_pick_proxy_file).grid(row=0, column=2)
+
+        smtp_accounts_file_var.trace_add("write", lambda *_: _refresh_accounts_info())
+        _refresh_accounts_info()
+
+        # Message
+        msg_section = self.ctk.CTkFrame(container, fg_color=("gray95", "gray20"), corner_radius=10)
+        msg_section.pack(fill="x", pady=(0, 10))
+        self.ctk.CTkLabel(msg_section, text="Письмо", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(10, 6))
+
+        msg_subject_var = self.ctk.StringVar(value=str(message_raw.get("subject", "")))
+        msg_template_var = self.ctk.StringVar(value=str(message_raw.get("template", self.template_var.get() or "")))
+        msg_reply_to_var = self.ctk.StringVar(value=str(message_raw.get("reply_to", self.replyto_var.get() or "")))
+        _row(msg_section, "Тема по умолчанию", msg_subject_var)
+        _row(msg_section, "Шаблон", msg_template_var)
+        _row(msg_section, "Reply-To", msg_reply_to_var)
+
+        # Delivery
+        d_section = self.ctk.CTkFrame(container, fg_color=("gray95", "gray20"), corner_radius=10)
+        d_section.pack(fill="x", pady=(0, 10))
+        self.ctk.CTkLabel(d_section, text="Отправка", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(10, 6))
+
+        d_delay_var = self.ctk.StringVar(value=str(delivery_raw.get("delay_seconds", self.delay_var.get() or "0")))
+        d_rate_var = self.ctk.StringVar(value=str(delivery_raw.get("rate_limit_per_minute", self.rate_limit_var.get() or "")))
+        d_retry_var = self.ctk.StringVar(value=str(delivery_raw.get("retry_attempts", self.retry_attempts_var.get() or "1")))
+        d_backoff_var = self.ctk.StringVar(value=str(delivery_raw.get("retry_backoff_seconds", self.retry_backoff_var.get() or "5")))
+        d_parallel_var = self.ctk.StringVar(value=str(delivery_raw.get("parallel_smtp_accounts", self.parallel_smtp_var.get() or "1")))
+        d_batch_var = self.ctk.StringVar(value=str(delivery_raw.get("batch_interval_seconds", self.batch_interval_var.get() or "0")))
+        d_log_var = self.ctk.StringVar(value=str(delivery_raw.get("log_file", "logs/email_app.log")))
+        d_hist_csv_var = self.ctk.StringVar(value=str(delivery_raw.get("history_csv", "history/email_history.csv")))
+        d_hist_jsonl_var = self.ctk.StringVar(value=str(delivery_raw.get("history_jsonl", "history/email_history.jsonl")))
+
+        _row(d_section, "Delay (сек)", d_delay_var)
+        _row(d_section, "Rate limit / мин", d_rate_var)
+        _row(d_section, "Retry попытки", d_retry_var)
+        _row(d_section, "Retry backoff (сек)", d_backoff_var)
+        _row(d_section, "Parallel SMTP", d_parallel_var)
+        _row(d_section, "Batch interval", d_batch_var)
+        _row(d_section, "Лог файл", d_log_var)
+        _row(d_section, "History CSV", d_hist_csv_var)
+        _row(d_section, "History JSONL", d_hist_jsonl_var)
+
+        btns = self.ctk.CTkFrame(container, fg_color="transparent")
+        btns.pack(fill="x", pady=(2, 8))
+
+        def _save_settings() -> None:
+            try:
+                accounts_file_text = smtp_accounts_file_var.get().strip()
+                proxy_file_text = smtp_proxy_file_var.get().strip()
+                smtp_mode = smtp_mode_var.get().strip() or "single"
+
+                smtp_payload = dict(raw.get("smtp") or {})
+
+                # Общие поля (для single и bulk)
+                timeout_text = smtp_timeout_var.get().strip()
+                smtp_payload["timeout_seconds"] = int(timeout_text or "30")
+                smtp_payload["use_tls"] = bool(smtp_use_tls_var.get())
+                smtp_payload["use_ssl"] = bool(smtp_use_ssl_var.get())
+
+                # Прокси-файл
+                if proxy_file_text:
+                    smtp_payload["proxy_file"] = self._portable_path_value(proxy_file_text)
+                else:
+                    smtp_payload.pop("proxy_file", None)
+
+                if smtp_mode == "bulk":
+                    if not accounts_file_text:
+                        raise ValueError("В режиме «Пакет аккаунтов» укажите файл SMTP-аккаунтов")
+                    accounts_path = (self.base_dir / accounts_file_text).resolve()
+                    if not accounts_path.exists():
+                        raise ValueError(f"Файл SMTP-аккаунтов не найден: {accounts_file_text}")
+                    rough_count = 0
+                    try:
+                        _accounts = _load_accounts_with_wizard_defaults(accounts_path)
+                        if not _accounts:
+                            raise ValueError("Файл SMTP-аккаунтов пуст")
+                    except Exception as error:  # noqa: BLE001
+                        # Не блокируем сохранение мастера полностью, если файл неполный:
+                        # допускаем сохранение при наличии строк, чтобы пользователь мог
+                        # донастроить домены/host позже из GUI.
+                        rough_count = _count_non_comment_lines(accounts_path)
+                        if rough_count <= 0:
+                            raise ValueError(f"Ошибка SMTP-файла: {error}") from error
+                        self._append_log(
+                            "⚠️ SMTP-файл сохранён с предупреждением: есть строки, которые пока не удалось разобрать. "
+                            f"Строк в файле: {rough_count}. Подробно: {error}"
+                        )
+
+                    smtp_payload["accounts_file"] = self._portable_path_value(accounts_file_text)
+
+                    # Не заставляем пользователя заполнять single-поля,
+                    # но если он их ввёл — сохраняем как fallback.
+                    if smtp_host_var.get().strip():
+                        smtp_payload["host"] = smtp_host_var.get().strip()
+                    if smtp_port_var.get().strip():
+                        smtp_payload["port"] = int(smtp_port_var.get().strip())
+                    if smtp_user_var.get().strip():
+                        smtp_payload["username"] = smtp_user_var.get().strip()
+                    if smtp_pass_var.get().strip():
+                        smtp_payload["password"] = smtp_pass_var.get().strip()
+                    if smtp_from_email_var.get().strip():
+                        smtp_payload["from_email"] = smtp_from_email_var.get().strip()
+                    if smtp_from_name_var.get().strip():
+                        smtp_payload["from_name"] = smtp_from_name_var.get().strip()
+                else:
+                    # Single-account режим
+                    smtp_payload.pop("accounts_file", None)
+                    smtp_payload["host"] = smtp_host_var.get().strip()
+                    smtp_payload["port"] = int(smtp_port_var.get().strip() or "0")
+                    smtp_payload["username"] = smtp_user_var.get().strip()
+                    smtp_payload["password"] = smtp_pass_var.get().strip()
+                    smtp_payload["from_email"] = smtp_from_email_var.get().strip()
+                    smtp_payload["from_name"] = smtp_from_name_var.get().strip()
+
+                    required = ["host", "port", "username", "password", "from_email", "from_name"]
+                    missing = [key for key in required if not smtp_payload.get(key)]
+                    if missing:
+                        raise ValueError("Заполните SMTP поля: " + ", ".join(missing))
+
+                message_payload = {
+                    "subject": msg_subject_var.get().strip() or "Без темы",
+                    "template": msg_template_var.get().strip(),
+                    "reply_to": msg_reply_to_var.get().strip() or None,
+                    "attachments": list((raw.get("message") or {}).get("attachments") or []),
+                    "inline_images": dict((raw.get("message") or {}).get("inline_images") or {}),
+                }
+
+                delivery_payload = {
+                    "delay_seconds": float(d_delay_var.get().strip() or "0"),
+                    "log_file": d_log_var.get().strip() or "logs/email_app.log",
+                    "history_csv": d_hist_csv_var.get().strip() or "history/email_history.csv",
+                    "history_jsonl": d_hist_jsonl_var.get().strip() or "history/email_history.jsonl",
+                    "parallel_smtp_accounts": int(d_parallel_var.get().strip() or "1"),
+                    "batch_interval_seconds": float(d_batch_var.get().strip() or "0"),
+                    "retry_attempts": int(d_retry_var.get().strip() or "1"),
+                    "retry_backoff_seconds": float(d_backoff_var.get().strip() or "5"),
+                }
+                if d_rate_var.get().strip():
+                    delivery_payload["rate_limit_per_minute"] = int(d_rate_var.get().strip())
+
+                raw["smtp"] = smtp_payload
+                raw["message"] = message_payload
+                raw["delivery"] = {**(raw.get("delivery") or {}), **delivery_payload}
+
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                config_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+                # синхронизация текущих виджетов
+                self.smtp_accounts_file_var.set(accounts_file_text if smtp_mode == "bulk" else "")
+                self.proxy_file_var.set(proxy_file_text or self.proxy_file_var.get())
+                self.template_var.set(msg_template_var.get().strip())
+                self.replyto_var.set(msg_reply_to_var.get().strip())
+                self.delay_var.set(str(delivery_payload["delay_seconds"]))
+                self.rate_limit_var.set(str(delivery_payload.get("rate_limit_per_minute", "")))
+                self.retry_attempts_var.set(str(delivery_payload["retry_attempts"]))
+                self.retry_backoff_var.set(str(delivery_payload["retry_backoff_seconds"]))
+                self.parallel_smtp_var.set(str(delivery_payload["parallel_smtp_accounts"]))
+                self.batch_interval_var.set(str(delivery_payload["batch_interval_seconds"]))
+
+                self._append_log(f"⚙️ Настройки сохранены: {self.config_var.get()}")
+                self.status_var.set("✓ Настройки сохранены")
+                self._update_eta_estimate()
+                self._refresh_templates()
+                win.destroy()
+            except Exception as error:  # noqa: BLE001
+                messagebox.showerror("Мастер настройки", f"Не удалось сохранить: {error}", parent=win)
+
+        self.ctk.CTkButton(btns, text="💾 Сохранить настройки", command=_save_settings).pack(side="left")
+        self.ctk.CTkButton(btns, text="✕ Закрыть", command=win.destroy, fg_color=("gray70", "gray30")).pack(side="right")
+
+    def _select_smtp_accounts_file(self) -> None:
         path = filedialog.askopenfilename(
             initialdir=self.base_dir,
-            filetypes=[("YAML", "*.yaml *.yml"), ("Все файлы", "*.*")],
+            filetypes=[("SMTP accounts", "*.txt *.csv"), ("TXT", "*.txt"), ("CSV", "*.csv"), ("Все файлы", "*.*")],
         )
-        if path:
-            self.config_var.set(self._relative(Path(path)))
+        if not path:
+            return
+
+        if self._looks_like_smtp_domains_file(Path(path)):
+            messagebox.showwarning(
+                "SMTP аккаунты",
+                "Вы выбрали smtp_domains.txt (база доменов).\n"
+                "Выберите файл SMTP-аккаунтов с логинами/паролями.",
+            )
+            return
+
+        relative_path = self._relative(Path(path))
+        self.smtp_accounts_file_var.set(relative_path)
+        self._apply_smtp_accounts_file_to_config(relative_path)
+
+    def _apply_smtp_accounts_file_to_config(self, accounts_file: str) -> None:
+        config_path = self.base_dir / self.config_var.get()
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            smtp = raw.get("smtp") or {}
+            smtp["accounts_file"] = self._portable_path_value(accounts_file)
+            raw["smtp"] = smtp
+            config_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            try:
+                from .config import _load_smtp_accounts
+                _accs = _load_smtp_accounts(self.base_dir / accounts_file)
+                self._append_log(f"SMTP accounts file подключён: {accounts_file} ({len(_accs)} аккаунтов)")
+                self.status_var.set(f"✓ SMTP-аккаунты подключены: {len(_accs)}")
+            except Exception as error:  # noqa: BLE001
+                self._append_log(f"⚠️ SMTP файл подключён, но есть проблемы валидации: {error}")
+                self.status_var.set("⚠️ Проверьте SMTP файл")
+                messagebox.showwarning(
+                    "SMTP аккаунты",
+                    "Файл подключён, но есть ошибки формата/данных.\n"
+                    "Для реальной проверки логин/пароль используйте кнопку «📦 Тест SMTP (все)».\n\n"
+                    f"Детали: {error}",
+                )
+        except Exception as error:  # noqa: BLE001
+            messagebox.showerror("SMTP аккаунты", f"Не удалось обновить конфиг: {error}")
+
+    def _show_template_variables_hint(self) -> None:
+        recipients_file = self.recipients_var.get().strip() or "recipients.csv"
+        smtp_accounts_file = self.smtp_accounts_file_var.get().strip() or "(не выбран)"
+        messagebox.showinfo(
+            "Подсказка {{...}}",
+            "Как использовать переменные в шаблоне:\n\n"
+            "1) Переменные из content:\n"
+            "   {{ приветствие }}\n"
+            "   {{ кнопка }}\n\n"
+            "2) Случайное значение из списка:\n"
+            "   {{ приветствие | random }}\n\n"
+            "3) Данные получателя:\n"
+            "   {{ recipient.email }}\n"
+            "   {{ recipient.name }}\n\n"
+            "4) Поля из recipients.csv/txt:\n"
+            "   {{ recipient.phone }}\n"
+            "   {{ recipient.city }}\n\n"
+            "5) Данные SMTP аккаунта (из выбранного файла SMTP аккаунтов):\n"
+            "   {{ smtp.username }}\n"
+            "   {{ smtp.from_email }}\n"
+            "   {{ smtp.from_name }}\n"
+            "   {{ smtp.host }} / {{ smtp.port }}\n\n"
+            "6) Текст письма из поля «Тексты писем»:\n"
+            "   {{ body_text }}  (или {{ message_text }})\n\n"
+            "Важно: все {{ recipient.* }} берутся из файла получателей, выбранного в поле «Получатели»:\n"
+            f"{recipients_file}\n\n"
+            "Источник {{ smtp.* }}: поле «SMTP аккаунты»:\n"
+            f"{smtp_accounts_file}",
+        )
 
     def _select_recipients(self) -> None:
         path = filedialog.askopenfilename(
             initialdir=self.base_dir,
-            filetypes=[("CSV", "*.csv"), ("Все файлы", "*.*")],
+            filetypes=[("CSV/TXT", "*.csv *.txt"), ("CSV", "*.csv"), ("TXT", "*.txt"), ("Все файлы", "*.*")],
         )
         if path:
             self.recipients_var.set(self._relative(Path(path)))
             self._load_recipients_for_preview()
+            self._update_recipients_count(Path(path))
 
     def _select_templates(self) -> None:
         path = filedialog.askdirectory(initialdir=self.base_dir)
@@ -344,7 +999,543 @@ class ModernEmailAppGUI:
             filetypes=[("Text files", "*.txt"), ("Все файлы", "*.*")],
         )
         if path:
-            self.proxy_file_var.set(self._relative(Path(path)))
+            relative_path = self._relative(Path(path))
+            self.proxy_file_var.set(relative_path)
+            self._apply_proxy_file_to_config(relative_path)
+
+    def _apply_proxy_file_to_config(self, proxy_file: str) -> None:
+        config_path = self.base_dir / self.config_var.get()
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            smtp = raw.get("smtp") or {}
+            smtp["proxy_file"] = self._portable_path_value(proxy_file)
+            raw["smtp"] = smtp
+            config_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            self._append_log(f"Прокси-файл подключён: {proxy_file}")
+            self.status_var.set("✓ Прокси-файл подключён")
+        except Exception as error:  # noqa: BLE001
+            messagebox.showerror("Прокси", f"Не удалось обновить конфиг: {error}")
+
+    # ------------------------------------------------------------------ #
+    # Темы писем (subjects TXT)                                           #
+    # ------------------------------------------------------------------ #
+
+    def _select_subjects_file(self) -> None:
+        path = filedialog.askopenfilename(
+            initialdir=self.base_dir,
+            filetypes=[("TXT", "*.txt"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+        relative_path = self._relative(Path(path))
+        self.subjects_file_var.set(relative_path)
+        self._load_subjects_file(Path(path))
+
+    def _load_subjects_file(self, path: Path) -> None:
+        """Загружает список тем из TXT-файла (одна тема — одна строка)."""
+        subjects: list[str] = []
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    s = line.strip()
+                    if s and not s.startswith("#"):
+                        subjects.append(s)
+        except Exception as error:  # noqa: BLE001
+            messagebox.showerror("Темы", f"Не удалось загрузить файл тем: {error}")
+            return
+        self._subjects_list = subjects
+        self._subjects_count_label.configure(text=f"Тем загружено: {len(subjects)}")
+        self._append_log(f"Загружено тем: {len(subjects)} из {self.subjects_file_var.get()}")
+
+    def _pick_random_subject(self) -> str | None:
+        """Случайно выбирает тему из загруженного списка (или None если список пуст)."""
+        if self._subjects_list:
+            import random as _random
+            return _random.choice(self._subjects_list)
+        return None
+
+    def _select_texts_file(self) -> None:
+        path = filedialog.askopenfilename(
+            initialdir=self.base_dir,
+            filetypes=[("TXT", "*.txt"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+        relative_path = self._relative(Path(path))
+        self.texts_file_var.set(relative_path)
+        self._load_texts_file(Path(path))
+
+    def _load_texts_file(self, path: Path) -> None:
+        """Загружает варианты текста письма из TXT (одна строка = один вариант)."""
+        texts: list[str] = []
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    s = line.strip()
+                    if s and not s.startswith("#"):
+                        texts.append(s)
+        except Exception as error:  # noqa: BLE001
+            messagebox.showerror("Тексты", f"Не удалось загрузить файл текстов: {error}")
+            return
+
+        self._texts_list = texts
+        self.text_choice_combo.configure(values=texts or [""])
+        if texts:
+            if self.text_choice_var.get().strip() not in texts:
+                self.text_choice_var.set(texts[0])
+        else:
+            self.text_choice_var.set("")
+        self._texts_count_label.configure(text=f"Текстов: {len(texts)}")
+        self._append_log(f"Загружено текстов: {len(texts)} из {self.texts_file_var.get()}")
+        self._update_text_mode_ui()
+
+    def _text_mode_key(self) -> str:
+        mode_ui = self.text_mode_var.get().strip()
+        mapping = {
+            "Фиксированный": "fixed",
+            "Случайный (на кампанию)": "random_campaign",
+            "Случайный (на получателя)": "random_recipient",
+            "fixed": "fixed",
+            "random": "random_campaign",
+            "random_campaign": "random_campaign",
+            "random_recipient": "random_recipient",
+        }
+        return mapping.get(mode_ui, "fixed")
+
+    def _update_text_mode_ui(self) -> None:
+        mode = self._text_mode_key()
+        if mode in {"random_campaign", "random_recipient"}:
+            self.text_choice_combo.configure(state="disabled")
+        else:
+            self.text_choice_combo.configure(state="normal")
+
+    def _pick_message_text(self) -> str | None:
+        """Возвращает текст письма: fixed (выбранный) или random из файла текстов."""
+        if not self._texts_list:
+            return None
+        mode = self._text_mode_key()
+        if mode == "random_campaign":
+            selected = random.choice(self._texts_list)
+            self.text_choice_var.set(selected)
+            return selected
+        if mode == "random_recipient":
+            return None
+
+        selected = self.text_choice_var.get().strip()
+        if selected:
+            return selected
+        self.text_choice_var.set(self._texts_list[0])
+        return self._texts_list[0]
+
+    # ------------------------------------------------------------------ #
+    # SMTP Domains Manager (редактор базы доменов)                        #
+    # ------------------------------------------------------------------ #
+
+    def _open_smtp_domains_manager(self) -> None:
+        """Открывает диалог редактора базы SMTP-доменов."""
+        import tkinter as tk
+
+        domains_file = self.base_dir / "config" / "smtp_domains.txt"
+        domains: dict = load_domains(self.base_dir)
+
+        win = self.ctk.CTkToplevel(self.root)
+        win.title("🗂 SMTP Домены — менеджер")
+        win.geometry("780x540")
+        win.grab_set()
+
+        # --- Заголовок ---
+        self.ctk.CTkLabel(
+            win,
+            text="🗂 База SMTP-доменов (автоопределение по email)",
+            font=("", 14, "bold"),
+        ).pack(anchor="w", padx=12, pady=(12, 4))
+        self.ctk.CTkLabel(
+            win,
+            text=f"Файл: {domains_file}",
+            font=("", 10),
+            text_color="gray",
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        # --- Treeview ---
+        tree_frame = tk.Frame(win)
+        tree_frame.pack(fill="both", expand=True, padx=12, pady=4)
+
+        columns = ("domain", "host", "port", "type")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
+        tree.heading("domain", text="Домен")
+        tree.heading("host", text="SMTP Хост")
+        tree.heading("port", text="Порт")
+        tree.heading("type", text="Тип соединения")
+        tree.column("domain", width=160, anchor="w")
+        tree.column("host", width=220, anchor="w")
+        tree.column("port", width=60, anchor="center")
+        tree.column("type", width=120, anchor="center")
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscroll=scrollbar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def refresh_tree() -> None:
+            tree.delete(*tree.get_children())
+            for domain, s in sorted(domains.items()):
+                conn_label = _flags_to_label(s.get("use_tls", False), s.get("use_ssl", False))
+                tree.insert("", "end", values=(f"@{domain}", s["host"], s["port"], conn_label))
+
+        refresh_tree()
+
+        # --- Кнопки ---
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(fill="x", padx=12, pady=8)
+
+        def add_domain() -> None:
+            self._open_domain_edit_dialog(win, domains, None, refresh_tree)
+
+        def edit_domain() -> None:
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("SMTP Домены", "Выберите строку для редактирования")
+                return
+            item = tree.item(sel[0])
+            domain_key = str(item["values"][0]).lstrip("@")
+            self._open_domain_edit_dialog(win, domains, domain_key, refresh_tree)
+
+        def delete_domain() -> None:
+            sel = tree.selection()
+            if not sel:
+                return
+            item = tree.item(sel[0])
+            domain_key = str(item["values"][0]).lstrip("@")
+            if messagebox.askyesno("Удалить", f"Удалить домен @{domain_key}?", parent=win):
+                domains.pop(domain_key, None)
+                refresh_tree()
+
+        def save_domains() -> None:
+            try:
+                save_smtp_domains_file(domains_file, domains)
+                self._append_log(f"SMTP домены сохранены: {domains_file}")
+                messagebox.showinfo("Сохранено", f"Файл обновлён:\n{domains_file}", parent=win)
+            except Exception as error:  # noqa: BLE001
+                messagebox.showerror("Ошибка", f"Не удалось сохранить: {error}", parent=win)
+
+        tk.Button(btn_frame, text="➕  Добавить", command=add_domain, padx=8, pady=4).pack(side="left", padx=4)
+        tk.Button(btn_frame, text="✏️  Изменить", command=edit_domain, padx=8, pady=4).pack(side="left", padx=4)
+        tk.Button(btn_frame, text="🗑  Удалить",  command=delete_domain, padx=8, pady=4).pack(side="left", padx=4)
+        tk.Button(btn_frame, text="💾  Сохранить", command=save_domains, padx=8, pady=4, bg="#2a7d2a", fg="white").pack(side="left", padx=4)
+        tk.Button(btn_frame, text="✕  Закрыть",  command=win.destroy, padx=8, pady=4).pack(side="right", padx=4)
+
+    def _open_content_variables_manager(self) -> None:
+        """Менеджер переменных из settings.yaml/content для {{ ... }} в шаблоне."""
+        import tkinter as tk
+
+        config_path = self.base_dir / self.config_var.get()
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            raw = {}
+
+        content_data: dict = dict(raw.get("content") or {})
+        recipients_file = self.recipients_var.get().strip() or "recipients.csv"
+        smtp_accounts_file = self.smtp_accounts_file_var.get().strip() or "(не выбран)"
+
+        win = self.ctk.CTkToplevel(self.root)
+        win.title("🧩 Переменные письма ({{ ... }})")
+        win.geometry("960x620")
+        win.grab_set()
+
+        header = self.ctk.CTkFrame(win, fg_color="transparent")
+        header.pack(fill="x", padx=12, pady=(10, 6))
+        self.ctk.CTkLabel(
+            header,
+            text=(
+                "Подсказка: {{ имя_переменной }}; для списков — {{ имя_переменной | random }}. "
+                f"{{{{ recipient.* }}}} берётся из файла: {recipients_file}"
+            ),
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w")
+        self.ctk.CTkLabel(
+            header,
+            text=(
+                "SMTP-переменные в шаблоне: {{ smtp.username }}, {{ smtp.from_email }}, "
+                "{{ smtp.from_name }}, {{ smtp.host }}, {{ smtp.port }}. "
+                f"Источник: {smtp_accounts_file}"
+            ),
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", pady=(2, 0))
+
+        try:
+            _accs = self._resolve_all_smtp_accounts_for_test()
+            if _accs:
+                _a = _accs[0]
+                self.ctk.CTkLabel(
+                    header,
+                    text=(
+                        "Пример значений smtp.* (1-й аккаунт): "
+                        f"smtp.username={_a.username}, smtp.from_email={_a.from_email}, "
+                        f"smtp.host={_a.host}, smtp.port={_a.port}"
+                    ),
+                    font=("", 10),
+                    text_color=("gray40", "gray60"),
+                ).pack(anchor="w", pady=(2, 0))
+        except Exception:
+            pass
+
+        body = self.ctk.CTkFrame(win)
+        body.pack(fill="both", expand=True, padx=12, pady=8)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        left = self.ctk.CTkFrame(body)
+        right = self.ctk.CTkFrame(body)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        # Левая часть: список переменных
+        tree = ttk.Treeview(left, columns=("name", "type", "preview"), show="headings", height=18)
+        tree.heading("name", text="Переменная")
+        tree.heading("type", text="Тип")
+        tree.heading("preview", text="Значение")
+        tree.column("name", width=180, anchor="w")
+        tree.column("type", width=90, anchor="center")
+        tree.column("preview", width=320, anchor="w")
+        tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+        def _preview_value(value: object) -> tuple[str, str]:
+            if isinstance(value, list):
+                text = " | ".join(str(x) for x in value[:3])
+                if len(value) > 3:
+                    text += " ..."
+                return "list", text
+            return "string", str(value)
+
+        def _refresh_tree() -> None:
+            tree.delete(*tree.get_children())
+            for key, value in sorted(content_data.items()):
+                vtype, preview = _preview_value(value)
+                tree.insert("", "end", values=(str(key), vtype, preview))
+
+        _refresh_tree()
+
+        # Правая часть: редактор переменной
+        self.ctk.CTkLabel(right, text="Имя переменной", anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+        key_var = self.ctk.StringVar(value="")
+        key_entry = self.ctk.CTkEntry(right, textvariable=key_var)
+        key_entry.pack(fill="x", padx=10)
+
+        self.ctk.CTkLabel(
+            right,
+            text="Значение (1 строка = string, несколько строк = list/random)",
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=(10, 4))
+        value_box = self.ctk.CTkTextbox(right, wrap="word", height=260)
+        value_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        def _set_editor(key: str, value: object) -> None:
+            key_var.set(key)
+            value_box.delete("1.0", "end")
+            if isinstance(value, list):
+                value_box.insert("1.0", "\n".join(str(x) for x in value))
+            else:
+                value_box.insert("1.0", str(value))
+
+        def _on_select(_event=None) -> None:
+            sel = tree.selection()
+            if not sel:
+                return
+            vals = tree.item(sel[0], "values")
+            if not vals:
+                return
+            key = str(vals[0])
+            if key in content_data:
+                _set_editor(key, content_data[key])
+
+        tree.bind("<<TreeviewSelect>>", _on_select)
+
+        def _validate_key(name: str) -> str:
+            key = name.strip()
+            if not key:
+                raise ValueError("Имя переменной не может быть пустым")
+            if any(ch in key for ch in " {}"):
+                raise ValueError("Имя переменной не должно содержать пробелы, '{' или '}'")
+            return key
+
+        def _read_editor_value() -> object:
+            text = value_box.get("1.0", "end").strip()
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if len(lines) <= 1:
+                return lines[0] if lines else ""
+            return lines
+
+        def _add_or_update() -> None:
+            try:
+                key = _validate_key(key_var.get())
+            except ValueError as error:
+                messagebox.showerror("Переменные", str(error), parent=win)
+                return
+            content_data[key] = _read_editor_value()
+            _refresh_tree()
+
+        def _delete_var() -> None:
+            sel = tree.selection()
+            if not sel:
+                return
+            vals = tree.item(sel[0], "values")
+            if not vals:
+                return
+            key = str(vals[0])
+            if key in content_data and messagebox.askyesno("Удалить", f"Удалить переменную '{key}'?", parent=win):
+                content_data.pop(key, None)
+                _refresh_tree()
+                key_var.set("")
+                value_box.delete("1.0", "end")
+
+        def _new_var() -> None:
+            key_var.set("")
+            value_box.delete("1.0", "end")
+            key_entry.focus_set()
+
+        buttons = self.ctk.CTkFrame(right, fg_color="transparent")
+        buttons.pack(fill="x", padx=10, pady=(0, 10))
+        self.ctk.CTkButton(buttons, text="➕ Новый", command=_new_var, width=90).pack(side="left")
+        self.ctk.CTkButton(buttons, text="💾 Добавить/Обновить", command=_add_or_update).pack(side="left", padx=(8, 0))
+        self.ctk.CTkButton(buttons, text="🗑 Удалить", command=_delete_var, fg_color=("#a63d3d", "#7a2a2a")).pack(side="left", padx=(8, 0))
+
+        footer = self.ctk.CTkFrame(win, fg_color="transparent")
+        footer.pack(fill="x", padx=12, pady=(0, 10))
+
+        def _save_all() -> None:
+            try:
+                raw_local = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                raw_local = {}
+            raw_local["content"] = content_data
+            try:
+                config_path.write_text(yaml.safe_dump(raw_local, allow_unicode=True, sort_keys=False), encoding="utf-8")
+                self._append_log("🧩 Переменные content сохранены")
+                self.status_var.set("✓ Переменные сохранены")
+                messagebox.showinfo(
+                    "Сохранено",
+                    "Переменные сохранены.\n\nПримеры использования в шаблоне:\n"
+                    "- {{ имя_переменной }}\n"
+                    "- {{ имя_переменной | random }}\n"
+                    "- {{ recipient.email }}\n"
+                    "- {{ recipient.name }}\n"
+                    "- {{ body_text }} (текст письма из TXT)\n"
+                    "- {{ smtp.username }}\n"
+                    "- {{ smtp.from_email }}\n\n"
+                    "Источник для {{ recipient.* }}: файл из поля «Получатели».\n"
+                    f"Текущий файл: {recipients_file}\n\n"
+                    "Источник для {{ smtp.* }}: файл из поля «SMTP аккаунты».\n"
+                    f"Текущий файл: {smtp_accounts_file}",
+                    parent=win,
+                )
+                win.destroy()
+            except Exception as error:  # noqa: BLE001
+                messagebox.showerror("Переменные", f"Не удалось сохранить: {error}", parent=win)
+
+        self.ctk.CTkButton(footer, text="💾 Сохранить переменные", command=_save_all).pack(side="left")
+        self.ctk.CTkButton(footer, text="❔ Подсказка {{...}}", command=lambda: messagebox.showinfo(
+            "Подсказка",
+            "Как использовать переменные в HTML-шаблоне:\n\n"
+            "1) Обычное значение:\n"
+            "   {{ приветствие }}\n\n"
+            "2) Случайное значение из списка:\n"
+            "   {{ приветствие | random }}\n\n"
+            "3) Данные получателя:\n"
+            "   {{ recipient.email }}\n"
+            "   {{ recipient.name }}\n\n"
+            "4) Данные SMTP аккаунта:\n"
+            "   {{ smtp.username }}\n"
+            "   {{ smtp.from_email }}\n"
+            "   {{ smtp.host }}\n\n"
+            "5) Текст письма из TXT:\n"
+            "   {{ body_text }} (или {{ message_text }})\n\n"
+            "6) Цепочка с макросами из CSV поддерживается автоматически.\n\n"
+            "Важно: {{ recipient.email }}, {{ recipient.name }} и другие {{ recipient.* }} "
+            "читаются из файла, указанного в поле «Получатели».\n"
+            f"Текущий файл: {recipients_file}\n\n"
+            "{{ smtp.* }} читаются из активного SMTP аккаунта (из поля «SMTP аккаунты»).\n"
+            f"Текущий файл: {smtp_accounts_file}",
+            parent=win,
+        ), fg_color=("gray70", "gray30")).pack(side="left", padx=(8, 0))
+        self.ctk.CTkButton(footer, text="✕ Закрыть", command=win.destroy, fg_color=("gray70", "gray30")).pack(side="right")
+
+    def _open_domain_edit_dialog(
+        self,
+        parent: object,
+        domains: dict,
+        domain_key: str | None,
+        on_save: object,
+    ) -> None:
+        """Диалог добавления / редактирования записи домена."""
+        import tkinter as tk
+
+        existing = domains.get(domain_key, {}) if domain_key else {}
+        use_ssl = existing.get("use_ssl", False)
+        use_tls = existing.get("use_tls", False)
+        conn_default = _flags_to_label(use_tls, use_ssl)
+
+        dialog = tk.Toplevel(parent)
+        dialog.title("Добавить домен" if domain_key is None else f"Изменить @{domain_key}")
+        dialog.geometry("430x290")
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        pad = {"padx": 14, "pady": 8}
+
+        tk.Label(dialog, text="Домен (без @):").grid(row=0, column=0, sticky="w", **pad)
+        domain_entry = tk.Entry(dialog, width=34)
+        domain_entry.insert(0, domain_key or "")
+        domain_entry.grid(row=0, column=1, **pad)
+
+        tk.Label(dialog, text="SMTP Хост:").grid(row=1, column=0, sticky="w", **pad)
+        host_entry = tk.Entry(dialog, width=34)
+        host_entry.insert(0, existing.get("host", ""))
+        host_entry.grid(row=1, column=1, **pad)
+
+        tk.Label(dialog, text="Порт:").grid(row=2, column=0, sticky="w", **pad)
+        port_entry = tk.Entry(dialog, width=34)
+        port_entry.insert(0, str(existing.get("port", "465")))
+        port_entry.grid(row=2, column=1, **pad)
+
+        tk.Label(dialog, text="Тип соединения:").grid(row=3, column=0, sticky="w", **pad)
+        conn_var = tk.StringVar(value=conn_default)
+        conn_combo = ttk.Combobox(
+            dialog,
+            textvariable=conn_var,
+            values=["SSL/TLS", "STARTTLS", "plain"],
+            state="readonly",
+            width=22,
+        )
+        conn_combo.grid(row=3, column=1, sticky="w", **pad)
+
+        def _save() -> None:
+            domain = domain_entry.get().strip().lstrip("@").lower()
+            host = host_entry.get().strip()
+            try:
+                port = int(port_entry.get().strip())
+            except ValueError:
+                messagebox.showerror("Ошибка", "Порт должен быть числом", parent=dialog)
+                return
+            if not domain or not host:
+                messagebox.showerror("Ошибка", "Заполните домен и хост", parent=dialog)
+                return
+            conn = conn_var.get()
+            new_use_ssl = conn == "SSL/TLS"
+            new_use_tls = conn == "STARTTLS"
+            # Если домен переименован — удалить старый ключ
+            if domain_key and domain_key != domain:
+                domains.pop(domain_key, None)
+            domains[domain] = {"host": host, "port": port, "use_tls": new_use_tls, "use_ssl": new_use_ssl}
+            on_save()
+            dialog.destroy()
+
+        tk.Button(dialog, text="💾  Сохранить", command=_save, padx=10, pady=6, bg="#2a7d2a", fg="white").grid(
+            row=4, column=0, columnspan=2, pady=16,
+        )
 
     def _update_random_attachment_count(self) -> None:
         folder = self.attachments_folder_var.get().strip()
@@ -408,6 +1599,10 @@ class ModernEmailAppGUI:
             return
 
         self._update_random_attachment_count()
+        mode_key = self._text_mode_key()
+        self._selected_message_text = self._pick_message_text()
+        if mode_key == "random_recipient" and self._texts_list:
+            self._selected_message_text = self._texts_list[0]
 
         try:
             preflight = run_preflight(
@@ -416,6 +1611,7 @@ class ModernEmailAppGUI:
                 recipients_path=self.base_dir / self.recipients_var.get(),
                 templates_path=self.base_dir / self.templates_var.get(),
                 template_override=self.template_var.get() or None,
+                body_text_override=self._selected_message_text,
             )
         except CampaignError as error:
             messagebox.showerror("Email App Modern", str(error))
@@ -450,7 +1646,23 @@ class ModernEmailAppGUI:
         self.replyto_var.set(reply_to_random)
 
         mode_label = "фиксированный" if self.replyto_mode_var.get() == "fixed" else "случайный"
+        # Сброс состояния прогресса
+        self._stop_event.clear()
+        self._campaign_sent = 0
+        self._campaign_failed = 0
+        self._campaign_total = 0
+        self._campaign_start_time = None
+        self._campaign_failed_recipients = []
+        self.errors_btn.configure(state="disabled", fg_color=("gray75", "gray35"))
+        self.progress_bar.set(0)
+        self.progress_pct_label.configure(text="0%  (0/0)")
+        self.sent_label.configure(text="✅ Отправлено: 0")
+        self.failed_label.configure(text="❌ Ошибок: 0")
+        self.remaining_label.configure(text="⏳ Осталось: —")
+        self.eta_label.configure(text="⏱ ETA: —")
         self.status_var.set("⏳ Запуск...")
+        if self._selected_message_text:
+            self._append_log(f"📝 Текст письма выбран: {self._selected_message_text[:120]}")
         self._append_log(f"▶ Старт задачи (Reply-To: {reply_to_random}, режим: {mode_label})")
         self.worker = threading.Thread(target=self._run_worker, args=(delay,), daemon=True)
         self.worker.start()
@@ -526,6 +1738,11 @@ class ModernEmailAppGUI:
             except ValueError:
                 pass
 
+            # Для прокси минимум 3 попытки (иначе слишком часто attempts=1 и мгновенный фейл)
+            if self.proxy_enabled_var.get() and config.delivery.retry_attempts < 3:
+                config.delivery.retry_attempts = 3
+                self.queue.put(("log", "ℹ️ Retry увеличен до 3 для стабильной отправки через прокси"))
+
             # Override concurrency settings if set in GUI
             try:
                 config.delivery.parallel_smtp_enabled = self.parallel_enabled_var.get()
@@ -544,6 +1761,12 @@ class ModernEmailAppGUI:
                 templates_path=self.base_dir / self.templates_var.get(),
                 dry_run=self.dry_run_var.get(),
                 template_override=self.template_var.get() or None,
+                subject_override=None,
+                subject_mode=("random_recipient" if self._subjects_list else "fixed"),
+                subject_variants=list(self._subjects_list),
+                body_text_override=self._selected_message_text,
+                body_text_mode=self._text_mode_key(),
+                body_text_variants=list(self._texts_list),
                 random_attachments_folder_override=self.attachments_folder_var.get() or None,
                 use_proxy=self.proxy_enabled_var.get(),
                 proxy_file_override=self.proxy_file_var.get().strip() or None,
@@ -556,7 +1779,8 @@ class ModernEmailAppGUI:
                 batch_interval_seconds=config.delivery.batch_interval_seconds,
                 reply_to_override=self.replyto_var.get().strip() or None,
                 reply_to_mode_override=self.replyto_mode_var.get().strip() or None,
-                progress_callback=lambda message: self.queue.put(("log", message)),
+                stop_event=self._stop_event,
+                progress_callback=self._make_progress_callback(),
             )
             self.queue.put(("log", f"История CSV: {summary.history_csv}"))
             self.queue.put(("log", f"История JSONL: {summary.history_jsonl}"))
@@ -709,6 +1933,7 @@ class ModernEmailAppGUI:
                 recipients_path=self.base_dir / self.recipients_var.get(),
                 templates_path=self.base_dir / self.templates_var.get(),
                 template_override=self.template_var.get() or None,
+                body_text_override=self._pick_message_text(),
                 recipient_email=self.preview_recipient_var.get() or None,
                 open_in_browser=True,
             )
@@ -951,7 +2176,7 @@ class ModernEmailAppGUI:
             return
 
         self.current_preset_path = path
-        self.config_var.set(self._portable_path_value(preset.config))
+        self.config_var.set(self.DEFAULT_CONFIG_PATH)
         self.recipients_var.set(self._portable_path_value(preset.recipients))
         self.templates_var.set(self._portable_path_value(preset.templates))
         self.delay_var.set("" if preset.delay_seconds is None else str(preset.delay_seconds))
@@ -971,7 +2196,7 @@ class ModernEmailAppGUI:
         self._refresh_templates()
         if preset.template:
             self.template_var.set(preset.template)
-        self._append_log(f"Пресет загружен: {path}")
+        self._append_log(f"Пресет загружен: {path} (конфиг зафиксирован: {self.DEFAULT_CONFIG_PATH})")
         self.status_var.set("Пресет загружен")
         if not silent:
             messagebox.showinfo("Email App Modern", f"Пресет загружен: {path}")
@@ -985,10 +2210,17 @@ class ModernEmailAppGUI:
 
             if event == "log":
                 self._append_log(payload)
-                self.status_var.set(payload)
+                self.status_var.set(payload[:120])
+            elif event == "progress":
+                current, total, sent, failed = payload
+                self._update_progress_ui(current, total, sent, failed)
             elif event == "done":
                 self._append_log(payload)
                 self.status_var.set(payload)
+                self.progress_bar.set(1.0)
+                self.progress_pct_label.configure(text="100%")
+                if self._campaign_failed_recipients:
+                    self.errors_btn.configure(state="normal", fg_color=("#c0392b", "#922b21"))
                 messagebox.showinfo("✓ Результат", payload)
             elif event == "error":
                 self._append_log(f"✗ Ошибка: {payload}")
@@ -1021,6 +2253,23 @@ class ModernEmailAppGUI:
             return str(candidate.resolve().relative_to(self.base_dir.resolve()))
         except ValueError:
             return text
+
+    def _looks_like_smtp_domains_file(self, path: Path) -> bool:
+        """Эвристика: отличаем файл smtp_domains.txt от файла SMTP-аккаунтов."""
+        try:
+            with path.open("r", encoding="utf-8-sig") as handle:
+                for line in handle:
+                    text = line.strip()
+                    if not text or text.startswith("#"):
+                        continue
+                    # Типичный формат доменов: @domain;smtp.host:port:1:type
+                    if text.startswith("@") and ";" in text and "|" not in text:
+                        return True
+                    # Первая полезная строка не похожа на domains-format
+                    return False
+        except Exception:
+            return False
+        return False
 
     def _on_theme_change(self, selected_theme: str | None = None) -> None:
         """Handle theme change from combo callback and apply safely."""
@@ -1113,6 +2362,617 @@ class ModernEmailAppGUI:
         self._save_template_from_editor(suppress_message=True)
         self._check_template_variables()
         self._preview_email()
+
+    # ------------------------------------------------------------------ #
+    # Прогресс и счётчики                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _make_progress_callback(self):
+        """Возвращает progress_callback с разбором структуры сообщений."""
+        import re as _re
+        import time as _time
+
+        try:
+            _recs = load_recipients(self.base_dir / self.recipients_var.get())
+            self._campaign_total = len(_recs)
+        except RecipientsError:
+            self._campaign_total = 0
+        self._campaign_start_time = _time.monotonic()
+
+        def _cb(message: str) -> None:
+            self.queue.put(("log", message))
+            _m = _re.search(r'\[(?:OK|ERROR|DRY-RUN|SKIP)\] (\d+)/(\d+)', message)
+            if _m:
+                _current = int(_m.group(1))
+                _total = int(_m.group(2))
+                if "[OK]" in message or "[DRY-RUN]" in message:
+                    self._campaign_sent += 1
+                elif "[ERROR]" in message:
+                    self._campaign_failed += 1
+                    # Извлекаем email и причину ошибки из формата: [ERROR] N/M email: REASON (subject=...)
+                    _base = message.split(" (subject=", 1)[0]
+                    _m_err = _re.search(r'\[ERROR\] \d+/\d+ (\S+): (.+)', _base)
+                    if _m_err:
+                        self._campaign_failed_recipients.append({
+                            "email": _m_err.group(1),
+                            "reason": _m_err.group(2).strip(),
+                        })
+                self.queue.put(("progress", (_current, _total, self._campaign_sent, self._campaign_failed)))
+
+        return _cb
+
+    def _update_progress_ui(self, current: int, total: int, sent: int, failed: int) -> None:
+        import time as _time
+        if total > 0:
+            frac = min(current / total, 1.0)
+            self.progress_bar.set(frac)
+            self.progress_pct_label.configure(text=f"{int(frac * 100)}%  ({current}/{total})")
+        self.sent_label.configure(text=f"✅ Отправлено: {sent}")
+        self.failed_label.configure(text=f"❌ Ошибок: {failed}")
+        remaining = max(0, total - current)
+        self.remaining_label.configure(text=f"⏳ Осталось: {remaining}")
+        if self._campaign_start_time is not None and current > 0:
+            elapsed = _time.monotonic() - self._campaign_start_time
+            rate = current / elapsed
+            if rate > 0 and remaining > 0:
+                eta_secs = int(remaining / rate)
+                m, s = divmod(eta_secs, 60)
+                self.eta_label.configure(text=f"⏱ ETA: ~{m}м {s:02d}с")
+            else:
+                self.eta_label.configure(text="⏱ ETA: —")
+
+    def _show_failed_window(self) -> None:
+        """Показывает окно со списком адресов, на которые не удалось отправить письма."""
+        failed = self._campaign_failed_recipients
+        if not failed:
+            messagebox.showinfo("Ошибки отправки", "Список ошибок пуст.")
+            return
+
+        win = self.ctk.CTkToplevel(self.root)
+        win.title(f"❌ Ошибки отправки ({len(failed)})")
+        win.geometry("700x480")
+        win.grab_set()
+
+        self.ctk.CTkLabel(
+            win,
+            text=f"Не удалось отправить: {len(failed)} адрес(а/ов)",
+            font=("", 13, "bold"),
+            anchor="w",
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+
+        # Текстовый виджет со списком
+        text = self.ctk.CTkTextbox(win, wrap="word", font=("Courier", 11))
+        text.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        lines = []
+        for i, item in enumerate(failed, start=1):
+            lines.append(f"{i:>3}. {item['email']}")
+            lines.append(f"       └ {item['reason']}")
+            lines.append("")
+
+        text.insert("1.0", "\n".join(lines).rstrip())
+        text.configure(state="disabled")
+
+        def _copy_emails() -> None:
+            emails = "\n".join(item["email"] for item in failed)
+            win.clipboard_clear()
+            win.clipboard_append(emails)
+            messagebox.showinfo("Скопировано", f"Скопировано {len(failed)} адрес(а/ов) в буфер обмена.")
+
+        def _copy_all() -> None:
+            content = "\n".join(
+                f"{item['email']}\t{item['reason']}" for item in failed
+            )
+            win.clipboard_clear()
+            win.clipboard_append(content)
+            messagebox.showinfo("Скопировано", "Скопированы адреса и причины ошибок.")
+
+        btn_row = self.ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 14))
+        self.ctk.CTkButton(btn_row, text="📋 Скопировать адреса", width=180, command=_copy_emails).pack(side="left", padx=(0, 8))
+        self.ctk.CTkButton(btn_row, text="📋 Скопировать всё", width=160, fg_color=("gray70", "gray35"), command=_copy_all).pack(side="left")
+        self.ctk.CTkButton(btn_row, text="✕ Закрыть", width=100, fg_color=("gray70", "gray35"), command=win.destroy).pack(side="right")
+
+    def _update_recipients_count(self, path: Path) -> None:
+        """Пересчитывает получателей и обновляет метку + ETA."""
+        try:
+            recs = load_recipients(path)
+            count = len(recs)
+            self._recipients_count = count
+            self.recipients_count_label.configure(text=f"👥 Получателей: {count}")
+        except RecipientsError:
+            self.recipients_count_label.configure(text="⚠️ Файл не распознан")
+            self._recipients_count = 0
+        self._update_eta_estimate()
+
+    def _update_eta_estimate(self) -> None:
+        """Обновляет оценочное время завершения рядом с числом получателей."""
+        try:
+            delay = float(self.delay_var.get().strip() or "0")
+        except ValueError:
+            delay = 0.0
+        count = self._recipients_count
+        if count and delay:
+            total_secs = count * delay
+            m, s = divmod(int(total_secs), 60)
+            h, m2 = divmod(m, 60)
+            if h:
+                eta = f"⏱ ~{h}ч {m2}м"
+            else:
+                eta = f"⏱ ~{m}м {s}с"
+        elif count:
+            eta = f"⏱ ~{count} писем без задержки"
+        else:
+            eta = ""
+        self.eta_estimate_label.configure(text=eta)
+
+    # ------------------------------------------------------------------ #
+    # Stop / Test SMTP                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _stop_campaign(self) -> None:
+        """Запрашивает остановку текущей рассылки."""
+        if self.worker and self.worker.is_alive():
+            self._stop_event.set()
+            self.status_var.set("⏹ Остановка...")
+            self._append_log("⏹ Запрошена остановка рассылки")
+        else:
+            messagebox.showinfo("Стоп", "Рассылка не запущена")
+
+    def _resolve_all_smtp_accounts_for_test(self) -> list[object]:
+        """Возвращает список SMTP-аккаунтов для тестов (из accounts_file или smtp секции)."""
+        from .config import _build_smtp_settings, _load_smtp_accounts_txt, _load_smtp_accounts
+        from .smtp_domains import load_domains as _ld, get_smtp_defaults_for_email
+
+        config_path = self.base_dir / self.config_var.get()
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        smtp_raw: dict = dict(raw.get("smtp") or {})
+
+        acf_value = smtp_raw.get("accounts_file")
+        if acf_value:
+            acf_path = self.base_dir / str(acf_value)
+            if acf_path.exists() and acf_path.suffix.lower() in (".txt", ".csv"):
+                domains_db = _ld(self.base_dir)
+                smtp_defaults = {
+                    "host": smtp_raw.get("host"),
+                    "port": smtp_raw.get("port"),
+                    "from_name": smtp_raw.get("from_name"),
+                    "use_tls": smtp_raw.get("use_tls"),
+                    "use_ssl": smtp_raw.get("use_ssl"),
+                    "timeout_seconds": smtp_raw.get("timeout_seconds"),
+                }
+                if acf_path.suffix.lower() == ".txt":
+                    return _load_smtp_accounts_txt(acf_path, smtp_defaults, domains_db=domains_db, base_dir=self.base_dir)
+                return _load_smtp_accounts(acf_path)
+
+        mapping = {k: v for k, v in smtp_raw.items() if k not in ("accounts_file", "proxy_file")}
+        if not mapping.get("host"):
+            username = str(mapping.get("username", ""))
+            if username:
+                guessed = get_smtp_defaults_for_email(username, domains=_ld(self.base_dir))
+                mapping.setdefault("host", guessed.get("host"))
+                mapping.setdefault("port", guessed.get("port"))
+                if mapping.get("use_tls") is None:
+                    mapping["use_tls"] = guessed.get("use_tls", True)
+                if mapping.get("use_ssl") is None:
+                    mapping["use_ssl"] = guessed.get("use_ssl", False)
+        return [_build_smtp_settings(mapping)]
+
+    def _test_all_smtp_accounts(self) -> None:
+        """Тестирует авторизацию всех SMTP-аккаунтов из пакета."""
+        import smtplib
+        import socket as _socket
+
+        def _humanize_error_ru(error: Exception | str) -> str:
+            raw = str(error)
+            low = raw.lower()
+            if "authentication" in low or "535" in low or "username and password not accepted" in low:
+                return "Ошибка авторизации SMTP (неверный логин/пароль или app-password)"
+            if "timed out" in low or "timeout" in low:
+                return "Таймаут соединения"
+            if "connection refused" in low:
+                return "Соединение отклонено SMTP-сервером"
+            if "name or service not known" in low or "nodename nor servname provided" in low:
+                return "Ошибка DNS/имени SMTP-сервера"
+            if "ssl" in low or "certificate" in low:
+                return "Ошибка SSL/TLS"
+            return raw
+
+        try:
+            accounts = self._resolve_all_smtp_accounts_for_test()
+        except Exception as error:  # noqa: BLE001
+            messagebox.showerror("Тест SMTP (все)", f"Не удалось загрузить аккаунты: {error}")
+            return
+
+        if not accounts:
+            messagebox.showinfo("Тест SMTP (все)", "SMTP аккаунты не найдены")
+            return
+
+        win = self.ctk.CTkToplevel(self.root)
+        win.title("📦 Тест SMTP всех аккаунтов")
+        win.geometry("760x520")
+        win.grab_set()
+
+        self.ctk.CTkLabel(win, text=f"Аккаунтов для теста: {len(accounts)}", font=("", 12, "bold")).pack(anchor="w", padx=12, pady=(12, 6))
+        result_text = self.ctk.CTkTextbox(win, wrap="word")
+        result_text.pack(fill="both", expand=True, padx=12, pady=8)
+
+        def append(line: str) -> None:
+            result_text.insert("end", line + "\n")
+            result_text.see("end")
+
+        def run_all() -> None:
+            ok = 0
+            bad = 0
+            result_text.delete("1.0", "end")
+            for idx, smtp in enumerate(accounts, start=1):
+                conn_type = "SSL" if smtp.use_ssl else "STARTTLS" if smtp.use_tls else "plain"
+                append(f"[{idx}/{len(accounts)}] {smtp.username} -> {smtp.host}:{smtp.port} ({conn_type})")
+                win.update()
+                try:
+                    if smtp.use_ssl:
+                        conn = smtplib.SMTP_SSL(smtp.host, smtp.port, timeout=smtp.timeout_seconds)
+                    else:
+                        conn = smtplib.SMTP(smtp.host, smtp.port, timeout=smtp.timeout_seconds)
+                        if smtp.use_tls:
+                            conn.ehlo()
+                            conn.starttls()
+                            conn.ehlo()
+                    conn.login(smtp.username, smtp.password)
+                    conn.quit()
+                    ok += 1
+                    append("  ✅ OK")
+                except smtplib.SMTPAuthenticationError as exc:
+                    bad += 1
+                    append(f"  ❌ AUTH: {_humanize_error_ru(exc)}")
+                except _socket.timeout:
+                    bad += 1
+                    append("  ❌ TIMEOUT")
+                except Exception as exc:  # noqa: BLE001
+                    bad += 1
+                    append(f"  ❌ ERROR: {_humanize_error_ru(exc)}")
+
+            append("")
+            append(f"Итог: ✅ {ok} | ❌ {bad}")
+
+        btns = self.ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill="x", padx=12, pady=(0, 10))
+        self.ctk.CTkButton(btns, text="▶ Запустить тест", command=run_all).pack(side="left")
+        self.ctk.CTkButton(btns, text="✕ Закрыть", command=win.destroy).pack(side="right")
+
+    def _test_proxies(self) -> None:
+        """Тест прокси: доступность proxy host:port и туннель до SMTP через прокси."""
+        import socket
+        try:
+            import socks  # type: ignore
+        except Exception:
+            socks = None
+        from .proxy_utils import load_proxies
+
+        proxy_file = (self.base_dir / self.proxy_file_var.get().strip()).resolve()
+        if not proxy_file.exists():
+            messagebox.showerror("Тест прокси", f"Файл не найден: {proxy_file}")
+            return
+
+        try:
+            proxies = load_proxies(proxy_file)
+        except Exception as error:  # noqa: BLE001
+            messagebox.showerror("Тест прокси", f"Ошибка чтения прокси: {error}")
+            return
+
+        if not proxies:
+            messagebox.showinfo("Тест прокси", "В файле нет прокси")
+            return
+
+        smtp_target_host = None
+        smtp_target_port = None
+        smtp_probe_targets: list[tuple[str, int, str]] = [
+            ("smtp.gmail.com", 465, "Gmail SSL"),
+            ("smtp.gmail.com", 587, "Gmail STARTTLS"),
+        ]
+        try:
+            accounts = self._resolve_all_smtp_accounts_for_test()
+            if accounts:
+                smtp_target_host = accounts[0].host
+                smtp_target_port = int(accounts[0].port)
+                known = {(host, port) for host, port, _label in smtp_probe_targets}
+                for account in accounts:
+                    h = str(account.host).strip()
+                    p = int(account.port)
+                    if h and p and (h, p) not in known:
+                        smtp_probe_targets.append((h, p, "Из SMTP аккаунта"))
+                        known.add((h, p))
+        except Exception:
+            smtp_target_host = None
+            smtp_target_port = None
+
+        win = self.ctk.CTkToplevel(self.root)
+        win.title("🧪 Тест прокси")
+        win.geometry("760x520")
+        win.grab_set()
+
+        self.ctk.CTkLabel(win, text=f"Прокси для теста: {len(proxies)}", font=("", 12, "bold")).pack(anchor="w", padx=12, pady=(12, 6))
+        result_text = self.ctk.CTkTextbox(win, wrap="word")
+        result_text.pack(fill="both", expand=True, padx=12, pady=8)
+
+        def append(line: str) -> None:
+            result_text.insert("end", line + "\n")
+            result_text.see("end")
+
+        def _humanize_error_ru(error: Exception | str) -> str:
+            raw = str(error)
+            low = raw.lower()
+            if "network unreachable" in low:
+                return "Сеть недоступна для SMTP через этот прокси"
+            if "timed out" in low or "timeout" in low:
+                return "Таймаут соединения"
+            if "connection refused" in low:
+                return "Соединение отклонено"
+            if "name or service not known" in low or "nodename nor servname provided" in low:
+                return "Ошибка DNS/имени хоста"
+            if "authentication" in low and "proxy" in low:
+                return "Ошибка авторизации прокси"
+            return raw
+
+        def run_test() -> None:
+            ok = 0
+            bad = 0
+            smtp_ready = 0
+            result_text.delete("1.0", "end")
+            if smtp_target_host and smtp_target_port:
+                append(f"Цель для туннеля: {smtp_target_host}:{smtp_target_port}")
+            else:
+                append("Цель для туннеля: не определена (нет SMTP в конфиге)")
+            append("Проверка SMTP-портов через прокси: 465/587 + цели из SMTP-аккаунтов")
+            append("")
+
+            def _connect_via_proxy(proxy: dict, target_host: str, target_port: int, timeout: int = 7) -> tuple[bool, str]:
+                p_host = str(proxy.get("proxy_host") or "")
+                p_port = int(proxy.get("proxy_port") or 0)
+                p_type = str(proxy.get("proxy_type") or "").lower()
+                p_user = proxy.get("proxy_user")
+                p_pass = proxy.get("proxy_pass")
+
+                if socks is None:
+                    return False, "PySocks не установлен"
+
+                proxy_map = {
+                    "socks5": socks.SOCKS5,
+                    "socks4": socks.SOCKS4,
+                    "http": socks.HTTP,
+                    "https": socks.HTTP,
+                }
+                pconst = proxy_map.get(p_type)
+                if pconst is None:
+                    return False, f"неизвестный тип прокси: {p_type}"
+
+                s = socks.socksocket()
+                s.settimeout(timeout)
+                try:
+                    s.set_proxy(
+                        proxy_type=pconst,
+                        addr=p_host,
+                        port=p_port,
+                        rdns=True,
+                        username=str(p_user) if p_user else None,
+                        password=str(p_pass) if p_pass else None,
+                    )
+                    s.connect((target_host, target_port))
+                    return True, "ok"
+                except Exception as exc:  # noqa: BLE001
+                    return False, _humanize_error_ru(exc)
+                finally:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+            for idx, proxy in enumerate(proxies, start=1):
+                host = proxy.get("proxy_host")
+                port = int(proxy.get("proxy_port") or 0)
+                ptype = proxy.get("proxy_type")
+                append(f"[{idx}/{len(proxies)}] {ptype}:{host}:{port}")
+                win.update()
+                try:
+                    with socket.create_connection((str(host), int(port)), timeout=5):
+                        pass
+                    append("  ✅ proxy reachable")
+                except Exception as exc:  # noqa: BLE001
+                    bad += 1
+                    append(f"  ❌ proxy unreachable: {_humanize_error_ru(exc)}")
+                    continue
+
+                if not (smtp_target_host and smtp_target_port):
+                    ok += 1
+                    append("  ℹ️ туннель SMTP пропущен")
+                    continue
+
+                tunnel_ok, tunnel_msg = _connect_via_proxy(proxy, str(smtp_target_host), int(smtp_target_port))
+                if tunnel_ok:
+                    ok += 1
+                    append(f"  ✅ SMTP tunnel OK -> {smtp_target_host}:{smtp_target_port}")
+                else:
+                    bad += 1
+                    append(f"  ❌ SMTP tunnel failed: {tunnel_msg}")
+
+                probe_465_ok = False
+                probe_587_ok = False
+                for target_host, target_port, label in smtp_probe_targets:
+                    probe_ok, probe_msg = _connect_via_proxy(proxy, target_host, target_port, timeout=8)
+                    if probe_ok:
+                        append(f"  ✅ {label}: {target_host}:{target_port}")
+                        if target_port == 465:
+                            probe_465_ok = True
+                        if target_port == 587:
+                            probe_587_ok = True
+                    else:
+                        append(f"  ❌ {label}: {target_host}:{target_port} -> {probe_msg}")
+
+                if probe_465_ok or probe_587_ok:
+                    smtp_ready += 1
+                    ports_ok = []
+                    if probe_465_ok:
+                        ports_ok.append("465")
+                    if probe_587_ok:
+                        ports_ok.append("587")
+                    append(f"  🟢 SMTP-ready: да (порты: {', '.join(ports_ok)})")
+                else:
+                    append("  🔴 SMTP-ready: нет (465/587 недоступны через прокси)")
+
+            append("")
+            append(f"Итог: ✅ {ok} | ❌ {bad} | SMTP-ready: {smtp_ready}/{len(proxies)}")
+
+        btns = self.ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill="x", padx=12, pady=(0, 10))
+        self.ctk.CTkButton(btns, text="▶ Запустить тест", command=run_test).pack(side="left")
+        self.ctk.CTkButton(btns, text="✕ Закрыть", command=win.destroy).pack(side="right")
+
+    # ------------------------------------------------------------------ #
+    # Открытие файлов / папки                                             #
+    # ------------------------------------------------------------------ #
+
+    def _open_log_file(self) -> None:
+        try:
+            config = load_config(self.base_dir / self.config_var.get())
+            log_path = (self.base_dir / config.delivery.log_file).resolve()
+        except ConfigError:
+            log_path = (self.base_dir / "logs" / "email_app.log").resolve()
+
+        if not log_path.exists():
+            messagebox.showinfo("Лог", f"Файл лога не найден:\n{log_path}")
+            return
+        try:
+            if sys.platform.startswith("darwin"):
+                subprocess.run(["open", str(log_path)])
+            elif sys.platform.startswith("win"):
+                os.startfile(str(log_path))  # type: ignore[attr-defined]
+            else:
+                subprocess.run(["xdg-open", str(log_path)])
+        except Exception as error:  # noqa: BLE001
+            messagebox.showerror("Лог", f"Не удалось открыть файл: {error}")
+
+    def _open_project_folder(self) -> None:
+        try:
+            if sys.platform.startswith("darwin"):
+                subprocess.run(["open", str(self.base_dir)])
+            elif sys.platform.startswith("win"):
+                os.startfile(str(self.base_dir))  # type: ignore[attr-defined]
+            else:
+                subprocess.run(["xdg-open", str(self.base_dir)])
+        except Exception as error:  # noqa: BLE001
+            messagebox.showerror("Папка", f"Не удалось открыть папку: {error}")
+
+    # ------------------------------------------------------------------ #
+    # Сохранение / загрузка последней сессии                              #
+    # ------------------------------------------------------------------ #
+
+    _SESSION_FILE = "config/.last_session.json"
+
+    def _save_last_session(self) -> None:
+        import json
+        data: dict = {
+            "recipients": self.recipients_var.get(),
+            "templates": self.templates_var.get(),
+            "smtp_accounts_file": self.smtp_accounts_file_var.get(),
+            "subjects_file": self.subjects_file_var.get(),
+            "texts_file": self.texts_file_var.get(),
+            "text_mode": self.text_mode_var.get(),
+            "text_choice": self.text_choice_var.get(),
+            "template": self.template_var.get(),
+            "proxy_file": self.proxy_file_var.get(),
+            "proxy_enabled": self.proxy_enabled_var.get(),
+            "delay": self.delay_var.get(),
+            "rate_limit": self.rate_limit_var.get(),
+            "retry_attempts": self.retry_attempts_var.get(),
+            "retry_backoff": self.retry_backoff_var.get(),
+            "parallel_smtp": self.parallel_smtp_var.get(),
+            "parallel_enabled": self.parallel_enabled_var.get(),
+            "batch_interval": self.batch_interval_var.get(),
+            "dry_run": self.dry_run_var.get(),
+            "replyto": self.replyto_var.get(),
+            "replyto_mode": self.replyto_mode_var.get(),
+            "theme": self.theme_var.get(),
+            "attachments_folder": self.attachments_folder_var.get(),
+        }
+        session_path = self.base_dir / self._SESSION_FILE
+        try:
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _load_last_session(self) -> None:
+        import json
+        session_path = self.base_dir / self._SESSION_FILE
+        if not session_path.exists():
+            return
+        try:
+            data: dict = json.loads(session_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+
+        str_pairs = [
+            ("recipients", self.recipients_var),
+            ("templates", self.templates_var),
+            ("smtp_accounts_file", self.smtp_accounts_file_var),
+            ("subjects_file", self.subjects_file_var),
+            ("texts_file", self.texts_file_var),
+            ("text_mode", self.text_mode_var),
+            ("text_choice", self.text_choice_var),
+            ("template", self.template_var),
+            ("proxy_file", self.proxy_file_var),
+            ("delay", self.delay_var),
+            ("rate_limit", self.rate_limit_var),
+            ("retry_attempts", self.retry_attempts_var),
+            ("retry_backoff", self.retry_backoff_var),
+            ("parallel_smtp", self.parallel_smtp_var),
+            ("batch_interval", self.batch_interval_var),
+            ("replyto", self.replyto_var),
+            ("replyto_mode", self.replyto_mode_var),
+            ("theme", self.theme_var),
+            ("attachments_folder", self.attachments_folder_var),
+        ]
+        for key, var in str_pairs:
+            if key in data and data[key] is not None:
+                var.set(str(data[key]))
+
+        # Конфиг в упрощённом режиме всегда фиксированный
+        self.config_var.set(self.DEFAULT_CONFIG_PATH)
+
+        bool_pairs = [
+            ("proxy_enabled", self.proxy_enabled_var),
+            ("parallel_enabled", self.parallel_enabled_var),
+            ("dry_run", self.dry_run_var),
+        ]
+        for key, var in bool_pairs:
+            if key in data:
+                var.set(bool(data[key]))
+
+        if "theme" in data:
+            self._on_theme_change(data["theme"])
+
+        # Пересчитать получателей из сохранённого пути
+        rcp_path = self.base_dir / self.recipients_var.get()
+        if rcp_path.exists():
+            self._update_recipients_count(rcp_path)
+
+        # Перезагрузить темы писем из сохранённого пути
+        subjects = data.get("subjects_file", "")
+        if subjects:
+            subjects_path = self.base_dir / subjects
+            if subjects_path.exists():
+                self._load_subjects_file(subjects_path)
+
+        texts = data.get("texts_file", "")
+        if texts:
+            texts_path = self.base_dir / texts
+            if texts_path.exists():
+                self._load_texts_file(texts_path)
+        self._update_text_mode_ui()
+
+    def _on_close(self) -> None:
+        self._save_last_session()
+        self.root.destroy()
 
     def run(self) -> None:
         self.root.mainloop()
