@@ -100,6 +100,7 @@ class ModernEmailAppGUI:
         self.editor_live_job = None
         # Отслеживание прогресса кампании
         self._stop_event: threading.Event = threading.Event()
+        self._pause_event: threading.Event = threading.Event()
         self._campaign_total: int = 0
         self._campaign_sent: int = 0
         self._campaign_failed: int = 0
@@ -348,8 +349,19 @@ class ModernEmailAppGUI:
         # Дополнительные кнопки на второй строке
         buttons_frame2 = self.ctk.CTkFrame(actions_section, fg_color="transparent")
         buttons_frame2.pack(fill="x", padx=12, pady=(0, 8))
-        for i in range(6):
+        for i in range(7):
             buttons_frame2.grid_columnconfigure(i, weight=1)
+
+        self.pause_btn = self.ctk.CTkButton(
+            buttons_frame2,
+            text="⏸ Пауза",
+            command=self._toggle_pause_campaign,
+            height=32,
+            font=("", 10),
+            fg_color=("#b9770e", "#7e5109"),
+            hover_color=("#d68910", "#9c640c"),
+        )
+        self.pause_btn.grid(row=0, column=0, sticky="ew", padx=4)
 
         self.ctk.CTkButton(
             buttons_frame2,
@@ -359,7 +371,7 @@ class ModernEmailAppGUI:
             font=("", 10),
             fg_color=("#c0392b", "#7b241c"),
             hover_color=("#e74c3c", "#922b21"),
-        ).grid(row=0, column=0, sticky="ew", padx=4)
+        ).grid(row=0, column=1, sticky="ew", padx=4)
 
         self.ctk.CTkButton(
             buttons_frame2,
@@ -368,7 +380,7 @@ class ModernEmailAppGUI:
             height=32,
             font=("", 10),
             fg_color=("gray70", "gray30"),
-        ).grid(row=0, column=1, sticky="ew", padx=4)
+        ).grid(row=0, column=2, sticky="ew", padx=4)
 
         self.ctk.CTkButton(
             buttons_frame2,
@@ -377,12 +389,12 @@ class ModernEmailAppGUI:
             height=32,
             font=("", 10),
             fg_color=("gray70", "gray30"),
-        ).grid(row=0, column=2, sticky="ew", padx=4)
+        ).grid(row=0, column=3, sticky="ew", padx=4)
 
         button_specs2 = [
-            ("📂 Очередь JSON", self._run_queue_dialog, 3),
-            ("💾 Экспорт JSON/CSV", self._export_queue_dialog, 4),
-            ("📂 Загрузить пресет", self._load_preset_dialog, 5),
+            ("📂 Очередь JSON", self._run_queue_dialog, 4),
+            ("💾 Экспорт JSON/CSV", self._export_queue_dialog, 5),
+            ("📂 Загрузить пресет", self._load_preset_dialog, 6),
         ]
         for label, command, col in button_specs2:
             self.ctk.CTkButton(
@@ -1550,6 +1562,8 @@ class ModernEmailAppGUI:
         mode_label = "фиксированный" if self.replyto_mode_var.get() == "fixed" else "случайный"
         # Сброс состояния прогресса
         self._stop_event.clear()
+        self._pause_event.clear()
+        self.pause_btn.configure(text="⏸ Пауза", fg_color=("#b9770e", "#7e5109"))
         self._campaign_sent = 0
         self._campaign_failed = 0
         self._campaign_total = 0
@@ -1680,6 +1694,7 @@ class ModernEmailAppGUI:
                 reply_to_override=self.replyto_var.get().strip() or None,
                 reply_to_mode_override=self.replyto_mode_var.get().strip() or None,
                 stop_event=self._stop_event,
+                pause_event=self._pause_event,
                 progress_callback=self._make_progress_callback(),
             )
             self.queue.put(("log", f"История CSV: {summary.history_csv}"))
@@ -2119,12 +2134,16 @@ class ModernEmailAppGUI:
                 self.status_var.set(payload)
                 self.progress_bar.set(1.0)
                 self.progress_pct_label.configure(text="100%")
+                self._pause_event.clear()
+                self.pause_btn.configure(text="⏸ Пауза", fg_color=("#b9770e", "#7e5109"))
                 if self._campaign_failed_recipients:
                     self.errors_btn.configure(state="normal", fg_color=("#c0392b", "#922b21"))
                 messagebox.showinfo("✓ Результат", payload)
             elif event == "error":
                 self._append_log(f"✗ Ошибка: {payload}")
                 self.status_var.set("✗ Ошибка")
+                self._pause_event.clear()
+                self.pause_btn.configure(text="⏸ Пауза", fg_color=("#b9770e", "#7e5109"))
                 messagebox.showerror("✗ Ошибка", payload)
 
         self.root.after(150, self._poll_queue)
@@ -2413,11 +2432,30 @@ class ModernEmailAppGUI:
     def _stop_campaign(self) -> None:
         """Запрашивает остановку текущей рассылки."""
         if self.worker and self.worker.is_alive():
+            self._pause_event.clear()
             self._stop_event.set()
+            self.pause_btn.configure(text="⏸ Пауза", fg_color=("#b9770e", "#7e5109"))
             self.status_var.set("⏹ Остановка...")
             self._append_log("⏹ Запрошена остановка рассылки")
         else:
             messagebox.showinfo("Стоп", "Рассылка не запущена")
+
+    def _toggle_pause_campaign(self) -> None:
+        """Ставит/снимает паузу текущей рассылки."""
+        if not (self.worker and self.worker.is_alive()):
+            messagebox.showinfo("Пауза", "Рассылка не запущена")
+            return
+
+        if self._pause_event.is_set():
+            self._pause_event.clear()
+            self.pause_btn.configure(text="⏸ Пауза", fg_color=("#b9770e", "#7e5109"))
+            self.status_var.set("▶ Продолжение...")
+            self._append_log("▶ Продолжение рассылки")
+        else:
+            self._pause_event.set()
+            self.pause_btn.configure(text="▶ Продолжить", fg_color=("#1f618d", "#154360"))
+            self.status_var.set("⏸ Пауза")
+            self._append_log("⏸ Пауза рассылки")
 
     def _resolve_all_smtp_accounts_for_test(self) -> list[object]:
         """Возвращает список SMTP-аккаунтов для тестов (из accounts_file или smtp секции)."""

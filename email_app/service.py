@@ -7,6 +7,7 @@ import logging
 import random
 import re
 import time
+import threading
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
@@ -26,6 +27,42 @@ from .validators import validate_csv_recipients
 from .proxy_utils import load_proxies, pick_random_proxy
 
 
+def _humanize_error_ru(error: Exception | str) -> str:
+    raw = str(error)
+    low = raw.lower()
+
+    if "network unreachable" in low:
+        return "Сеть недоступна для целевого узла (обычно прокси не имеет маршрута к SMTP)"
+    if "timed out" in low or "timeout" in low:
+        return "Превышено время ожидания соединения"
+    if "authentication" in low or "535" in low or "username and password not accepted" in low:
+        return "Ошибка авторизации SMTP (логин/пароль или app-password неверные)"
+    if "connection refused" in low:
+        return "Соединение отклонено сервером"
+    if "name or service not known" in low or "nodename nor servname provided" in low:
+        return "Не удалось определить DNS-имя SMTP-сервера"
+    if "certificate" in low or "ssl" in low:
+        return "Ошибка SSL/TLS (сертификат или режим шифрования)"
+    if "socket error" in low:
+        return f"Ошибка сокета: {raw}"
+    return raw
+
+
+def _is_retryable_send_error(error: Exception | str) -> bool:
+    raw = str(error).lower()
+    retry_markers = (
+        "network unreachable",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection aborted",
+        "temporary",
+        "try again",
+        "socket error",
+    )
+    return any(marker in raw for marker in retry_markers)
+
+
 def _send_with_retry(
     mailer,
     recipient,
@@ -35,10 +72,13 @@ def _send_with_retry(
     inline_image_paths,
     retry_attempts: int = 1,
     retry_backoff_seconds: float = 5.0,
+    before_attempt: Callable[[int], None] | None = None,
 ) -> None:
     """Send email with automatic retry on temporary failures."""
     last_error = None
     for attempt in range(retry_attempts):
+        if before_attempt is not None:
+            before_attempt(attempt + 1)
         try:
             mailer.send(
                 recipient=recipient,
@@ -50,8 +90,10 @@ def _send_with_retry(
             return
         except Exception as error:
             last_error = error
-            if attempt < retry_attempts - 1:
+            if attempt < retry_attempts - 1 and _is_retryable_send_error(error):
                 time.sleep(retry_backoff_seconds)
+            else:
+                break
     if last_error:
         raise last_error
 
@@ -129,6 +171,7 @@ def run_preflight(
     recipients_path: Path,
     templates_path: Path,
     template_override: str | None = None,
+    body_text_override: str | None = None,
 ) -> PreflightReport:
     checks: list[str] = []
     warnings: list[str] = []
@@ -188,13 +231,27 @@ def run_preflight(
     checks.append(f"SMTP-аккаунтов: {len(config.smtp_accounts)}")
 
     first_recipient = recipients[0]
+    preflight_content = dict(config.content)
+    if body_text_override is not None:
+        preflight_content["body_text"] = body_text_override
+        preflight_content["message_text"] = body_text_override
+
     rendered = renderer.render(
         template_name=template_name,
         recipient=first_recipient,
         context={
-            **config.content,
+            **preflight_content,
             "subject": config.message.subject,
             "inline_images": _build_inline_context(inline_image_paths),
+            "smtp": {
+                "host": config.smtp_accounts[0].host,
+                "port": config.smtp_accounts[0].port,
+                "username": config.smtp_accounts[0].username,
+                "from_email": config.smtp_accounts[0].from_email,
+                "from_name": config.smtp_accounts[0].from_name,
+                "use_tls": config.smtp_accounts[0].use_tls,
+                "use_ssl": config.smtp_accounts[0].use_ssl,
+            },
         },
     )
     checks.append(f"Рендер тестового письма: {first_recipient.email}")
@@ -251,6 +308,7 @@ def _append_history(
         "timestamp",
         "recipient",
         "status",
+        "subject",
         "template",
         "smtp_account",
         "proxy",
@@ -260,6 +318,23 @@ def _append_history(
     ]
 
     csv_exists = csv_path.exists()
+    if csv_exists:
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                existing_headers = reader.fieldnames or []
+                needs_migration = "subject" not in existing_headers
+                existing_rows = list(reader) if needs_migration else []
+
+            if needs_migration:
+                with csv_path.open("w", encoding="utf-8", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=headers)
+                    writer.writeheader()
+                    for row in existing_rows:
+                        writer.writerow({key: row.get(key, "") for key in headers})
+        except (OSError, csv.Error):
+            pass
+
     with csv_path.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers)
         if not csv_exists:
@@ -387,6 +462,7 @@ def render_preview(
     recipients_path: Path,
     templates_path: Path,
     template_override: str | None = None,
+    body_text_override: str | None = None,
     recipient_email: str | None = None,
     preview_path: Path | None = None,
     open_in_browser: bool = False,
@@ -417,8 +493,18 @@ def render_preview(
         recipient=recipient,
         context={
             **config.content,
+            **({"body_text": body_text_override, "message_text": body_text_override} if body_text_override is not None else {}),
             "subject": config.message.subject,
             "inline_images": _build_inline_context(inline_image_paths),
+            "smtp": {
+                "host": config.smtp_accounts[0].host,
+                "port": config.smtp_accounts[0].port,
+                "username": config.smtp_accounts[0].username,
+                "from_email": config.smtp_accounts[0].from_email,
+                "from_name": config.smtp_accounts[0].from_name,
+                "use_tls": config.smtp_accounts[0].use_tls,
+                "use_ssl": config.smtp_accounts[0].use_ssl,
+            },
         },
     )
     html_body = _inject_preview_inline_images(html_body, inline_image_paths)
@@ -442,6 +528,12 @@ def run_campaign(
     templates_path: Path,
     dry_run: bool = False,
     template_override: str | None = None,
+    subject_override: str | None = None,
+    subject_mode: str | None = None,
+    subject_variants: list[str] | None = None,
+    body_text_override: str | None = None,
+    body_text_mode: str | None = None,
+    body_text_variants: list[str] | None = None,
     random_attachments_folder_override: str | None = None,
     use_proxy: bool = True,
     proxy_file_override: str | None = None,
@@ -454,6 +546,8 @@ def run_campaign(
     batch_interval_seconds: float | None = None,
     reply_to_override: str | None = None,
     reply_to_mode_override: str | None = None,
+    stop_event: threading.Event | None = None,
+    pause_event: threading.Event | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> CampaignSummary:
     try:
@@ -468,6 +562,26 @@ def run_campaign(
         config.delivery.retry_attempts = max(1, int(retry_attempts))
     if retry_backoff_seconds is not None:
         config.delivery.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+
+    if subject_override:
+        config.message.subject = str(subject_override).strip()
+
+    subject_mode_key = (subject_mode or "fixed").strip().lower()
+    subject_variants_list = [str(item).strip() for item in (subject_variants or []) if str(item).strip()]
+    if subject_mode_key == "random_campaign" and subject_variants_list:
+        config.message.subject = random.choice(subject_variants_list)
+
+    text_mode = (body_text_mode or "fixed").strip().lower()
+    text_variants = [str(item).strip() for item in (body_text_variants or []) if str(item).strip()]
+
+    if text_mode == "random_campaign" and text_variants:
+        selected_text = random.choice(text_variants)
+        config.content["body_text"] = selected_text
+        config.content["message_text"] = selected_text
+    elif text_mode == "fixed" and body_text_override is not None:
+        selected_text = str(body_text_override)
+        config.content["body_text"] = selected_text
+        config.content["message_text"] = selected_text
 
     if parallel_smtp_enabled is not None:
         config.delivery.parallel_smtp_enabled = bool(parallel_smtp_enabled)
@@ -492,6 +606,7 @@ def run_campaign(
         recipients_path=recipients_path,
         templates_path=templates_path,
         template_override=template_override,
+        body_text_override=body_text_override,
     )
     if preflight.errors:
         raise CampaignError("; ".join(preflight.errors))
@@ -547,39 +662,102 @@ def run_campaign(
         if progress_callback is not None:
             progress_callback(message)
 
+    def _wait_if_paused_or_stopped() -> bool:
+        announced = False
+        while pause_event is not None and pause_event.is_set():
+            if stop_event is not None and stop_event.is_set():
+                return False
+            if not announced:
+                emit("⏸ Рассылка на паузе")
+                announced = True
+            time.sleep(0.2)
+        if announced:
+            emit("▶ Рассылка продолжена")
+        return not (stop_event is not None and stop_event.is_set())
+
+    def _sleep_with_controls(seconds: float) -> bool:
+        if seconds <= 0:
+            return True
+        end_at = time.monotonic() + seconds
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return False
+            if not _wait_if_paused_or_stopped():
+                return False
+            now = time.monotonic()
+            if now >= end_at:
+                return True
+            time.sleep(min(0.2, end_at - now))
+
     def _send_task(recipient_index: int, recipient: Recipient, mailer_settings, proxy_list, reply_to_candidates):
         nonlocal successful, failed, processed
         local_mailer = SMTPMailer(deepcopy(mailer_settings))
 
         proxy_info = "none"
-        if use_proxy and proxy_list:
-            proxy = pick_random_proxy(proxy_list)
-            local_mailer.settings.proxy_host = proxy.get("proxy_host")
-            local_mailer.settings.proxy_port = proxy.get("proxy_port")
-            local_mailer.settings.proxy_type = proxy.get("proxy_type")
-            local_mailer.settings.proxy_user = proxy.get("proxy_user")
-            local_mailer.settings.proxy_pass = proxy.get("proxy_pass")
-            proxy_info = f"{local_mailer.settings.proxy_type}:{local_mailer.settings.proxy_host}:{local_mailer.settings.proxy_port}"
-        else:
-            local_mailer.settings.proxy_host = None
-            local_mailer.settings.proxy_port = None
-            local_mailer.settings.proxy_type = None
-            local_mailer.settings.proxy_user = None
-            local_mailer.settings.proxy_pass = None
+        send_attempts = 0
+
+        def _apply_proxy_for_attempt(attempt_no: int) -> None:
+            nonlocal proxy_info, send_attempts
+            send_attempts = attempt_no
+            if use_proxy:
+                if proxy_list:
+                    proxy = pick_random_proxy(proxy_list)
+                    local_mailer.settings.proxy_host = proxy.get("proxy_host")
+                    local_mailer.settings.proxy_port = proxy.get("proxy_port")
+                    local_mailer.settings.proxy_type = proxy.get("proxy_type")
+                    local_mailer.settings.proxy_user = proxy.get("proxy_user")
+                    local_mailer.settings.proxy_pass = proxy.get("proxy_pass")
+                    proxy_info = f"{local_mailer.settings.proxy_type}:{local_mailer.settings.proxy_host}:{local_mailer.settings.proxy_port}"
+                elif local_mailer.settings.proxy_host and local_mailer.settings.proxy_port and local_mailer.settings.proxy_type:
+                    proxy_info = (
+                        f"{local_mailer.settings.proxy_type}:"
+                        f"{local_mailer.settings.proxy_host}:"
+                        f"{local_mailer.settings.proxy_port}"
+                    )
+                else:
+                    proxy_info = "enabled-but-not-configured"
+            else:
+                local_mailer.settings.proxy_host = None
+                local_mailer.settings.proxy_port = None
+                local_mailer.settings.proxy_type = None
+                local_mailer.settings.proxy_user = None
+                local_mailer.settings.proxy_pass = None
+                proxy_info = "none"
+
+        _apply_proxy_for_attempt(1)
 
         selected_reply_to = random.choice(reply_to_candidates) if reply_to_candidates else config.message.reply_to
         message_settings = _copy_message_settings(config.message, selected_reply_to)
+        if subject_mode_key == "random_recipient" and subject_variants_list:
+            message_settings.subject = random.choice(subject_variants_list)
 
         smtp_account = local_mailer.settings.from_email
         recipient_key = recipient.email.strip().lower()
+        recipient_text_context: dict[str, str] = {}
+        if text_mode == "random_recipient" and text_variants:
+            recipient_text = random.choice(text_variants)
+            recipient_text_context = {
+                "body_text": recipient_text,
+                "message_text": recipient_text,
+            }
 
         html_body = renderer.render(
             template_name=template_name,
             recipient=recipient,
             context={
                 **config.content,
+                **recipient_text_context,
                 "subject": config.message.subject,
                 "inline_images": _build_inline_context(inline_image_paths),
+                "smtp": {
+                    "host": local_mailer.settings.host,
+                    "port": local_mailer.settings.port,
+                    "username": local_mailer.settings.username,
+                    "from_email": local_mailer.settings.from_email,
+                    "from_name": local_mailer.settings.from_name,
+                    "use_tls": local_mailer.settings.use_tls,
+                    "use_ssl": local_mailer.settings.use_ssl,
+                },
             },
         )
 
@@ -592,7 +770,7 @@ def run_campaign(
         if dry_run:
             message = (
                 f"[DRY-RUN] {recipient_index}/{len(recipients)} подготовлено для {recipient.email} "
-                f"(smtp={smtp_account}, proxy={proxy_info}, reply_to={reply_to_info})"
+                f"(subject={message_settings.subject}, smtp={smtp_account}, proxy={proxy_info}, reply_to={reply_to_info})"
             )
             status = "dry-run"
             error_msg = ""
@@ -610,10 +788,11 @@ def run_campaign(
                     inline_image_paths=inline_image_paths,
                     retry_attempts=config.delivery.retry_attempts,
                     retry_backoff_seconds=config.delivery.retry_backoff_seconds,
+                    before_attempt=_apply_proxy_for_attempt,
                 )
                 message = (
                     f"[OK] {recipient_index}/{len(recipients)} отправлено: {recipient.email} "
-                    f"через {smtp_account} proxy={proxy_info} reply_to={reply_to_info}"
+                    f"через {smtp_account} subject={message_settings.subject} proxy={proxy_info} reply_to={reply_to_info} attempts={send_attempts}"
                 )
                 status = "sent"
                 error_msg = ""
@@ -621,12 +800,13 @@ def run_campaign(
                 fail_delta = 0
                 sent = True
             except Exception as error:
+                reason_ru = _humanize_error_ru(error)
                 message = (
-                    f"[ERROR] {recipient_index}/{len(recipients)} {recipient.email}: {error} "
-                    f"(smtp={smtp_account}, proxy={proxy_info}, reply_to={reply_to_info})"
+                    f"[ERROR] {recipient_index}/{len(recipients)} {recipient.email}: {reason_ru} "
+                    f"(subject={message_settings.subject}, smtp={smtp_account}, proxy={proxy_info}, reply_to={reply_to_info}, attempts={send_attempts})"
                 )
                 status = "error"
-                error_msg = str(error)
+                error_msg = reason_ru
                 success_delta = 0
                 fail_delta = 1
                 sent = False
@@ -638,6 +818,7 @@ def run_campaign(
             "success_delta": success_delta,
             "fail_delta": fail_delta,
             "recipient": recipient.email,
+            "subject": message_settings.subject,
             "smtp_account": smtp_account,
             "proxy": proxy_info,
             "reply_to": selected_reply_to or "",
@@ -676,6 +857,7 @@ def run_campaign(
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "recipient": recipient.email,
                     "status": "skipped-duplicate",
+                    "subject": config.message.subject,
                     "template": template_name,
                     "smtp_account": "",
                     "proxy": "disabled" if not use_proxy else "n/a",
@@ -687,12 +869,17 @@ def run_campaign(
             continue
         target_recipients.append((index, recipient))
 
-    use_parallel = config.delivery.parallel_smtp_enabled or (config.delivery.parallel_smtp_accounts > 1 and len(mailers) > 1)
+    # Параллельная отправка должна включаться только явным флагом.
+    # Иначе пользователь видит параллельный режим даже при выключенном чекбоксе.
+    use_parallel = bool(config.delivery.parallel_smtp_enabled) and (len(mailers) > 1)
     if use_parallel:
         batch_size = min(config.delivery.parallel_smtp_accounts, len(mailers)) if len(mailers) > 0 else 1
         batch_interval = max(0.0, config.delivery.batch_interval_seconds)
 
         for batch_start in range(0, len(target_recipients), batch_size):
+            if not _wait_if_paused_or_stopped():
+                emit("⏹ Рассылка остановлена пользователем")
+                break
             batch = target_recipients[batch_start : batch_start + batch_size]
             futures = {}
             with ThreadPoolExecutor(max_workers=batch_size) as executor:
@@ -714,6 +901,7 @@ def run_campaign(
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                             "recipient": result["recipient"],
                             "status": result["status"],
+                            "subject": result["subject"],
                             "template": template_name,
                             "smtp_account": result["smtp_account"],
                             "proxy": result["proxy"],
@@ -725,9 +913,14 @@ def run_campaign(
 
             if batch_interval > 0 and batch_start + batch_size < len(target_recipients):
                 emit(f"Пауза {batch_interval:.2f} сек.")
-                time.sleep(batch_interval)
+                if not _sleep_with_controls(batch_interval):
+                    emit("⏹ Рассылка остановлена пользователем")
+                    break
     else:
         for index, recipient in target_recipients:
+            if not _wait_if_paused_or_stopped():
+                emit("⏹ Рассылка остановлена пользователем")
+                break
             mailer_settings = deepcopy(config.smtp_accounts[(index - 1) % len(config.smtp_accounts)])
             result = _send_task(index, recipient, mailer_settings, proxies, reply_to_candidates)
             successful += result["success_delta"]
@@ -742,6 +935,7 @@ def run_campaign(
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "recipient": result["recipient"],
                     "status": result["status"],
+                    "subject": result["subject"],
                     "template": template_name,
                     "smtp_account": result["smtp_account"],
                     "proxy": result["proxy"],
@@ -753,22 +947,15 @@ def run_campaign(
 
             if final_delay > 0 and index < len(recipients):
                 emit(f"Пауза {final_delay:.2f} сек.")
-                time.sleep(final_delay)
+                if not _sleep_with_controls(final_delay):
+                    emit("⏹ Рассылка остановлена пользователем")
+                    break
 
     logger.info(
         "Завершено: processed=%s, successful=%s, failed=%s",
         processed,
         successful,
         failed,
-    )
-    return CampaignSummary(
-        total=len(recipients),
-        processed=processed,
-        successful=successful,
-        failed=failed,
-        log_file=log_path,
-        history_csv=history_csv_path,
-        history_jsonl=history_jsonl_path,
     )
     return CampaignSummary(
         total=len(recipients),
