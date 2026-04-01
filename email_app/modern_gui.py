@@ -80,10 +80,6 @@ class ModernEmailAppGUI:
         self.proxy_file_var = ctk.StringVar(value="config/proxies.txt")
         self.subjects_file_var = ctk.StringVar(value="")
         self._subjects_list: list[str] = []
-        self.texts_file_var = ctk.StringVar(value="")
-        self.text_mode_var = ctk.StringVar(value="Фиксированный")
-        self.text_choice_var = ctk.StringVar(value="")
-        self._texts_list: list[str] = []
         self.external_editor_path = ctk.StringVar(value="")
         self.proxy_enabled_var = ctk.BooleanVar(value=True)
         self.live_preview_var = ctk.BooleanVar(value=True)
@@ -108,7 +104,6 @@ class ModernEmailAppGUI:
         self._campaign_failed: int = 0
         self._campaign_start_time: float | None = None
         self._recipients_count: int = 0
-        self._selected_message_text: str | None = None
         self._campaign_failed_recipients: list[dict] = []  # [{email, reason}]
 
         self._build()
@@ -179,28 +174,6 @@ class ModernEmailAppGUI:
         self._add_path_row(config_section, 2, "Шаблоны", self.templates_var, self._select_templates)
         self._add_path_row(config_section, 3, "SMTP аккаунты", self.smtp_accounts_file_var, self._select_smtp_accounts_file)
         self._add_path_row(config_section, 4, "Темы писем", self.subjects_file_var, self._select_subjects_file)
-        self._add_path_row(config_section, 5, "Тексты писем", self.texts_file_var, self._select_texts_file)
-
-        text_mode_row = self.ctk.CTkFrame(config_section, fg_color="transparent")
-        text_mode_row.pack(fill="x", padx=14, pady=(0, 4))
-        text_mode_row.grid_columnconfigure(2, weight=1)
-        self.ctk.CTkLabel(text_mode_row, text="Режим текста:").grid(row=0, column=0, sticky="w")
-        self.ctk.CTkComboBox(
-            text_mode_row,
-            values=["Фиксированный", "Случайный (на кампанию)", "Случайный (на получателя)"],
-            variable=self.text_mode_var,
-            width=230,
-            command=lambda _value: self._update_text_mode_ui(),
-        ).grid(row=0, column=1, sticky="w", padx=(8, 8))
-        self.text_choice_combo = self.ctk.CTkComboBox(
-            text_mode_row,
-            values=[""],
-            variable=self.text_choice_var,
-            width=520,
-        )
-        self.text_choice_combo.grid(row=0, column=2, sticky="ew")
-        self._texts_count_label = self.ctk.CTkLabel(text_mode_row, text="")
-        self._texts_count_label.grid(row=0, column=3, sticky="e", padx=(8, 0))
 
         # === REPLY-TO / PROXY (в блоке Конфигурация) ===
         replyto_section = self.ctk.CTkFrame(config_section, fg_color="transparent")
@@ -1054,79 +1027,6 @@ class ModernEmailAppGUI:
             return _random.choice(self._subjects_list)
         return None
 
-    def _select_texts_file(self) -> None:
-        path = filedialog.askopenfilename(
-            initialdir=self.base_dir,
-            filetypes=[("TXT", "*.txt"), ("Все файлы", "*.*")],
-        )
-        if not path:
-            return
-        relative_path = self._relative(Path(path))
-        self.texts_file_var.set(relative_path)
-        self._load_texts_file(Path(path))
-
-    def _load_texts_file(self, path: Path) -> None:
-        """Загружает варианты текста письма из TXT (одна строка = один вариант)."""
-        texts: list[str] = []
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    s = line.strip()
-                    if s and not s.startswith("#"):
-                        texts.append(s)
-        except Exception as error:  # noqa: BLE001
-            messagebox.showerror("Тексты", f"Не удалось загрузить файл текстов: {error}")
-            return
-
-        self._texts_list = texts
-        self.text_choice_combo.configure(values=texts or [""])
-        if texts:
-            if self.text_choice_var.get().strip() not in texts:
-                self.text_choice_var.set(texts[0])
-        else:
-            self.text_choice_var.set("")
-        self._texts_count_label.configure(text=f"Текстов: {len(texts)}")
-        self._append_log(f"Загружено текстов: {len(texts)} из {self.texts_file_var.get()}")
-        self._update_text_mode_ui()
-
-    def _text_mode_key(self) -> str:
-        mode_ui = self.text_mode_var.get().strip()
-        mapping = {
-            "Фиксированный": "fixed",
-            "Случайный (на кампанию)": "random_campaign",
-            "Случайный (на получателя)": "random_recipient",
-            "fixed": "fixed",
-            "random": "random_campaign",
-            "random_campaign": "random_campaign",
-            "random_recipient": "random_recipient",
-        }
-        return mapping.get(mode_ui, "fixed")
-
-    def _update_text_mode_ui(self) -> None:
-        mode = self._text_mode_key()
-        if mode in {"random_campaign", "random_recipient"}:
-            self.text_choice_combo.configure(state="disabled")
-        else:
-            self.text_choice_combo.configure(state="normal")
-
-    def _pick_message_text(self) -> str | None:
-        """Возвращает текст письма: fixed (выбранный) или random из файла текстов."""
-        if not self._texts_list:
-            return None
-        mode = self._text_mode_key()
-        if mode == "random_campaign":
-            selected = random.choice(self._texts_list)
-            self.text_choice_var.set(selected)
-            return selected
-        if mode == "random_recipient":
-            return None
-
-        selected = self.text_choice_var.get().strip()
-        if selected:
-            return selected
-        self.text_choice_var.set(self._texts_list[0])
-        return self._texts_list[0]
-
     # ------------------------------------------------------------------ #
     # SMTP Domains Manager (редактор базы доменов)                        #
     # ------------------------------------------------------------------ #
@@ -1599,10 +1499,6 @@ class ModernEmailAppGUI:
             return
 
         self._update_random_attachment_count()
-        mode_key = self._text_mode_key()
-        self._selected_message_text = self._pick_message_text()
-        if mode_key == "random_recipient" and self._texts_list:
-            self._selected_message_text = self._texts_list[0]
 
         try:
             preflight = run_preflight(
@@ -1611,7 +1507,7 @@ class ModernEmailAppGUI:
                 recipients_path=self.base_dir / self.recipients_var.get(),
                 templates_path=self.base_dir / self.templates_var.get(),
                 template_override=self.template_var.get() or None,
-                body_text_override=self._selected_message_text,
+                body_text_override=None,
             )
         except CampaignError as error:
             messagebox.showerror("Email App Modern", str(error))
@@ -1661,8 +1557,6 @@ class ModernEmailAppGUI:
         self.remaining_label.configure(text="⏳ Осталось: —")
         self.eta_label.configure(text="⏱ ETA: —")
         self.status_var.set("⏳ Запуск...")
-        if self._selected_message_text:
-            self._append_log(f"📝 Текст письма выбран: {self._selected_message_text[:120]}")
         self._append_log(f"▶ Старт задачи (Reply-To: {reply_to_random}, режим: {mode_label})")
         self.worker = threading.Thread(target=self._run_worker, args=(delay,), daemon=True)
         self.worker.start()
@@ -1764,9 +1658,9 @@ class ModernEmailAppGUI:
                 subject_override=None,
                 subject_mode=("random_recipient" if self._subjects_list else "fixed"),
                 subject_variants=list(self._subjects_list),
-                body_text_override=self._selected_message_text,
-                body_text_mode=self._text_mode_key(),
-                body_text_variants=list(self._texts_list),
+                body_text_override=None,
+                body_text_mode="fixed",
+                body_text_variants=[],
                 random_attachments_folder_override=self.attachments_folder_var.get() or None,
                 use_proxy=self.proxy_enabled_var.get(),
                 proxy_file_override=self.proxy_file_var.get().strip() or None,
@@ -2875,9 +2769,6 @@ class ModernEmailAppGUI:
             "templates": self.templates_var.get(),
             "smtp_accounts_file": self.smtp_accounts_file_var.get(),
             "subjects_file": self.subjects_file_var.get(),
-            "texts_file": self.texts_file_var.get(),
-            "text_mode": self.text_mode_var.get(),
-            "text_choice": self.text_choice_var.get(),
             "template": self.template_var.get(),
             "proxy_file": self.proxy_file_var.get(),
             "proxy_enabled": self.proxy_enabled_var.get(),
@@ -2916,9 +2807,6 @@ class ModernEmailAppGUI:
             ("templates", self.templates_var),
             ("smtp_accounts_file", self.smtp_accounts_file_var),
             ("subjects_file", self.subjects_file_var),
-            ("texts_file", self.texts_file_var),
-            ("text_mode", self.text_mode_var),
-            ("text_choice", self.text_choice_var),
             ("template", self.template_var),
             ("proxy_file", self.proxy_file_var),
             ("delay", self.delay_var),
