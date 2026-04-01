@@ -80,6 +80,7 @@ class ModernEmailAppGUI:
         self.proxy_file_var = ctk.StringVar(value="config/proxies.txt")
         self.subjects_file_var = ctk.StringVar(value="")
         self._subjects_list: list[str] = []
+        self.subjects_mode_var = ctk.StringVar(value="random")  # "random" | "fixed"
         self.external_editor_path = ctk.StringVar(value="")
         self.proxy_enabled_var = ctk.BooleanVar(value=True)
         self.live_preview_var = ctk.BooleanVar(value=True)
@@ -174,6 +175,12 @@ class ModernEmailAppGUI:
         self._add_path_row(config_section, 2, "Шаблоны", self.templates_var, self._select_templates)
         self._add_path_row(config_section, 3, "SMTP аккаунты", self.smtp_accounts_file_var, self._select_smtp_accounts_file)
         self._add_path_row(config_section, 4, "Темы писем", self.subjects_file_var, self._select_subjects_file)
+
+        subjects_mode_row = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        subjects_mode_row.pack(fill="x", padx=14, pady=(0, 6))
+        self.ctk.CTkLabel(subjects_mode_row, text="Режим темы:").grid(row=0, column=0, sticky="w")
+        self.ctk.CTkRadioButton(subjects_mode_row, text="Случайная для каждого", variable=self.subjects_mode_var, value="random").grid(row=0, column=1, padx=(8, 4))
+        self.ctk.CTkRadioButton(subjects_mode_row, text="Одна для всей кампании", variable=self.subjects_mode_var, value="campaign").grid(row=0, column=2, padx=4)
 
         # === REPLY-TO / PROXY (в блоке Конфигурация) ===
         replyto_section = self.ctk.CTkFrame(config_section, fg_color="transparent")
@@ -1656,7 +1663,7 @@ class ModernEmailAppGUI:
                 dry_run=self.dry_run_var.get(),
                 template_override=self.template_var.get() or None,
                 subject_override=None,
-                subject_mode=("random_recipient" if self._subjects_list else "fixed"),
+                subject_mode=("random_recipient" if self.subjects_mode_var.get() == "random" else "random_campaign") if self._subjects_list else "fixed",
                 subject_variants=list(self._subjects_list),
                 body_text_override=None,
                 body_text_mode="fixed",
@@ -2769,6 +2776,7 @@ class ModernEmailAppGUI:
             "templates": self.templates_var.get(),
             "smtp_accounts_file": self.smtp_accounts_file_var.get(),
             "subjects_file": self.subjects_file_var.get(),
+            "subjects_mode": self.subjects_mode_var.get(),
             "template": self.template_var.get(),
             "proxy_file": self.proxy_file_var.get(),
             "proxy_enabled": self.proxy_enabled_var.get(),
@@ -2807,6 +2815,7 @@ class ModernEmailAppGUI:
             ("templates", self.templates_var),
             ("smtp_accounts_file", self.smtp_accounts_file_var),
             ("subjects_file", self.subjects_file_var),
+            ("subjects_mode", self.subjects_mode_var),
             ("template", self.template_var),
             ("proxy_file", self.proxy_file_var),
             ("delay", self.delay_var),
