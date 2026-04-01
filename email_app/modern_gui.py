@@ -107,6 +107,7 @@ class ModernEmailAppGUI:
         self._campaign_start_time: float | None = None
         self._recipients_count: int = 0
         self._campaign_failed_recipients: list[dict] = []  # [{email, reason}]
+        self._session_sent_recipients: set[str] = set()
 
         self._build()
         self._setup_mousewheel_scrolling()
@@ -1667,6 +1668,7 @@ class ModernEmailAppGUI:
             
             # Передать reply_to в message
             config.message.reply_to = self.replyto_var.get()
+            self.queue.put(("log", f"🧠 Сессия: уже отправлено адресов {len(self._session_sent_recipients)}"))
 
             summary = run_campaign(
                 base_dir=self.base_dir,
@@ -1696,6 +1698,7 @@ class ModernEmailAppGUI:
                 stop_event=self._stop_event,
                 pause_event=self._pause_event,
                 runtime_overrides_getter=self._build_runtime_overrides_getter(),
+                session_sent_cache=self._session_sent_recipients,
                 progress_callback=self._make_progress_callback(),
             )
             self.queue.put(("log", f"История CSV: {summary.history_csv}"))

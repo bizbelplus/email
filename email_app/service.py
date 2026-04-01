@@ -549,6 +549,7 @@ def run_campaign(
     stop_event: threading.Event | None = None,
     pause_event: threading.Event | None = None,
     runtime_overrides_getter: Callable[[], dict[str, object]] | None = None,
+    session_sent_cache: set[str] | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> CampaignSummary:
     try:
@@ -881,6 +882,7 @@ def run_campaign(
             "error_msg": error_msg,
             "success_delta": success_delta,
             "fail_delta": fail_delta,
+            "sent": sent,
             "recipient": recipient.email,
             "subject": message_settings.subject,
             "smtp_account": smtp_account,
@@ -905,10 +907,35 @@ def run_campaign(
     emit(f"Лог: {log_path}")
     emit(f"История CSV: {history_csv_path}")
     emit(f"История JSONL: {history_jsonl_path}")
+    if session_sent_cache is not None:
+        emit(f"🧠 Сессионный кэш отправленных: {len(session_sent_cache)}")
 
     target_recipients = []
+    session_seen = set(session_sent_cache or set())
     for index, recipient in enumerate(recipients, start=1):
         recipient_key = recipient.email.strip().lower()
+        if recipient_key in session_seen:
+            message = f"[SKIP] {index}/{len(recipients)} уже отправлено в этой сессии: {recipient.email}"
+            logger.info(message)
+            emit(message)
+            processed += 1
+            _append_history(
+                csv_path=history_csv_path,
+                jsonl_path=history_jsonl_path,
+                record={
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "recipient": recipient.email,
+                    "status": "skipped-session",
+                    "subject": runtime_subject_campaign_value,
+                    "template": runtime_template_name,
+                    "smtp_account": "",
+                    "proxy": "disabled" if not use_proxy else "n/a",
+                    "reply_to": config.message.reply_to or "",
+                    "dry_run": str(dry_run).lower(),
+                    "error": "already_sent_in_session",
+                },
+            )
+            continue
         if config.delivery.skip_previously_sent and recipient_key in dedupe_sent_set:
             message = f"[SKIP] {index}/{len(recipients)} дубликат: {recipient.email}"
             logger.info(message)
@@ -931,6 +958,7 @@ def run_campaign(
                 },
             )
             continue
+        session_seen.add(recipient_key)
         target_recipients.append((index, recipient))
 
     # Параллельная отправка должна включаться только явным флагом.
@@ -959,6 +987,8 @@ def run_campaign(
                     successful += result["success_delta"]
                     failed += result["fail_delta"]
                     processed += 1
+                    if result.get("sent") and session_sent_cache is not None:
+                        session_sent_cache.add(str(result["recipient"]).strip().lower())
                     logger.info(result["message"])
                     emit(result["message"])
                     _append_history(
@@ -996,6 +1026,8 @@ def run_campaign(
             successful += result["success_delta"]
             failed += result["fail_delta"]
             processed += 1
+            if result.get("sent") and session_sent_cache is not None:
+                session_sent_cache.add(str(result["recipient"]).strip().lower())
             logger.info(result["message"])
             emit(result["message"])
             _append_history(
