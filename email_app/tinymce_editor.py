@@ -162,429 +162,423 @@ class RichTemplateEditorServer:
 """
 
 
-EDITOR_HTML = """<!doctype html>
-<html lang=\"ru\">
+EDITOR_HTML = r"""<!doctype html>
+<html lang="ru">
   <head>
-    <meta charset=\"utf-8\">
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Визуальный редактор шаблона</title>
     <style>
-      :root {
-        --bg: #0f172a;
-        --panel: #111827;
-        --panel-2: #1f2937;
-        --text: #f9fafb;
-        --muted: #94a3b8;
-        --border: rgba(148, 163, 184, 0.25);
-        --accent: #2563eb;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: Inter, Arial, sans-serif;
-        background: var(--bg);
-        color: var(--text);
-      }
-      .layout {
-        display: grid;
-        grid-template-rows: auto auto 1fr auto;
-        min-height: 100vh;
-      }
-      .header,
-      .toolbar,
-      .footer {
-        padding: 12px 16px;
-        background: var(--panel);
-        border-bottom: 1px solid var(--border);
-      }
-      .footer {
-        border-bottom: 0;
-        border-top: 1px solid var(--border);
-        color: var(--muted);
-        font-size: 13px;
-      }
-      .header h1 {
-        margin: 0 0 4px;
-        font-size: 18px;
-      }
-      .header p {
-        margin: 0;
-        color: var(--muted);
-        font-size: 13px;
-      }
-      .toolbar {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        align-items: center;
-        background: var(--panel-2);
-      }
-      .toolbar button,
-      .toolbar select,
-      .toolbar input[type=\"color\"] {
-        border: 1px solid var(--border);
-        background: #0b1220;
-        color: var(--text);
-        border-radius: 10px;
-        padding: 8px 10px;
-        font-size: 13px;
-      }
-      .toolbar button { cursor: pointer; }
-      .toolbar button.primary { background: var(--accent); border-color: var(--accent); }
-      .workspace {
-        display: grid;
-        grid-template-columns: 1fr 0;
-        min-height: 0;
-      }
-      .workspace.source-open { grid-template-columns: 1fr 420px; }
-      .editor-pane,
-      .source-pane { min-height: 0; }
-      .editor-pane {
-        background: #e5e7eb;
-        padding: 12px;
-      }
-      #editorSurface {
-        min-height: calc(100vh - 240px);
-        background: white;
-        color: #111827;
-        padding: 24px;
-        outline: none;
-        border-radius: 12px;
-        overflow: auto;
-      }
-      #editorSurface:focus { box-shadow: inset 0 0 0 2px rgba(37, 99, 235, 0.35); }
-      .source-pane {
-        display: flex;
-        flex-direction: column;
-        border-left: 1px solid var(--border);
-        background: #020617;
-      }
-      .source-pane.hidden { display: none; }
-      .source-pane-header {
-        padding: 12px 14px;
-        font-size: 13px;
-        color: var(--muted);
-        border-bottom: 1px solid var(--border);
-      }
-      #sourceEditor {
-        flex: 1;
-        width: 100%;
-        border: 0;
-        resize: none;
-        padding: 14px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 13px;
-        line-height: 1.5;
-        color: #e5e7eb;
-        background: #020617;
-      }
-      .path { color: #93c5fd; font-weight: 600; }
-      @media (max-width: 980px) {
-        .workspace,
-        .workspace.source-open { grid-template-columns: 1fr; }
-        .source-pane {
-          border-left: 0;
-          border-top: 1px solid var(--border);
-          min-height: 260px;
-        }
-      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { height: 100%; font-family: Arial, sans-serif; background: #0f172a; color: #f9fafb; }
+      .layout { display: flex; flex-direction: column; height: 100vh; }
+      .header { padding: 12px 16px; background: #111827; border-bottom: 1px solid rgba(148,163,184,0.25); }
+      .header h1 { font-size: 18px; margin-bottom: 4px; }
+      .header p { font-size: 12px; color: #94a3b8; }
+      .toolbar { padding: 8px 12px; background: #1f2937; border-bottom: 1px solid rgba(148,163,184,0.25); display: flex; flex-wrap: wrap; gap: 6px; overflow-y: auto; max-height: 80px; }
+      .toolbar button, .toolbar select { padding: 6px 10px; border: 1px solid rgba(148,163,184,0.25); background: #0b1220; color: #f9fafb; border-radius: 6px; font-size: 12px; cursor: pointer; }
+      .toolbar button:hover { background: #111827; }
+      .workspace { display: flex; flex: 1; overflow: hidden; }
+      .editor-pane { flex: 1; background: #e5e7eb; padding: 12px; display: flex; flex-direction: column; }
+      #editorFrame { flex: 1; border: 0; background: #ffffff; border-radius: 8px; }
+      .source-pane { display: none; flex-direction: column; width: 400px; border-left: 1px solid rgba(148,163,184,0.25); background: #020617; }
+      .source-pane.visible { display: flex; }
+      .source-header { padding: 10px 12px; font-size: 12px; color: #94a3b8; border-bottom: 1px solid rgba(148,163,184,0.25); }
+      #sourceEditor { flex: 1; border: 0; padding: 12px; font-family: monospace; font-size: 12px; color: #e5e7eb; background: #020617; resize: none; }
+      .footer { padding: 10px 16px; background: #111827; border-top: 1px solid rgba(148,163,184,0.25); font-size: 12px; color: #94a3b8; display: flex; justify-content: space-between; }
+      .dirty { color: #fbbf24; }
+      .emoji-picker-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 9999; }
+      .emoji-picker-overlay.visible { display: flex; align-items: center; justify-content: center; }
+      .emoji-picker { background: #111827; border: 1px solid rgba(148,163,184,0.25); border-radius: 12px; padding: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.8); max-width: 400px; max-height: 500px; overflow-y: auto; }
+      .emoji-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; margin-bottom: 12px; }
+      .emoji-btn { background: #0b1220; border: 1px solid rgba(148,163,184,0.25); border-radius: 8px; padding: 8px; font-size: 24px; cursor: pointer; transition: all 0.2s; }
+      .emoji-btn:hover { background: #1f2937; transform: scale(1.1); }
+      .emoji-category { margin-bottom: 16px; }
+      .emoji-category-title { font-size: 12px; color: #94a3b8; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid rgba(148,163,184,0.15); }
+      .emoji-close { text-align: center; }
+      .emoji-close button { padding: 8px 16px; background: #0b1220; border: 1px solid rgba(148,163,184,0.25); color: #f9fafb; border-radius: 6px; cursor: pointer; font-size: 12px; }
+      .emoji-close button:hover { background: #1f2937; }
+      @media (max-width: 980px) { .source-pane { width: 100%; } .workspace { flex-direction: column; } }
     </style>
   </head>
   <body>
-    <div class=\"layout\">
-      <div class=\"header\">
+    <div class="layout">
+      <div class="header">
         <h1>Визуальный редактор письма</h1>
-        <p>Офлайн-редактор. Текущий файл: <span id=\"templatePath\" class=\"path\">—</span></p>
+        <p>Файл: <span id="templatePath" style="color:#93c5fd;font-weight:600;">—</span></p>
       </div>
-      <div class=\"toolbar\">
-        <button type=\"button\" data-cmd=\"bold\"><b>B</b></button>
-        <button type=\"button\" data-cmd=\"italic\"><i>I</i></button>
-        <button type=\"button\" data-cmd=\"underline\"><u>U</u></button>
-        <button type=\"button\" data-cmd=\"strikeThrough\"><s>S</s></button>
-        <select id=\"fontName\">
-          <option value=\"\">Шрифт</option>
-          <option value=\"Arial\">Arial</option>
-          <option value=\"Verdana\">Verdana</option>
-          <option value=\"Tahoma\">Tahoma</option>
-          <option value=\"Georgia\">Georgia</option>
-          <option value=\"Times New Roman\">Times New Roman</option>
-          <option value=\"Courier New\">Courier New</option>
+      <div class="toolbar">
+        <button data-cmd="bold" title="Жирный"><b>B</b></button>
+        <button data-cmd="italic" title="Курсив"><i>I</i></button>
+        <button data-cmd="underline" title="Подчёркивание"><u>U</u></button>
+        <button data-cmd="strikeThrough"><s>S</s></button>
+        <select data-cmd="formatBlock" title="Тип блока">
+          <option value="">Блок</option>
+          <option value="p">Параграф</option>
+          <option value="h1">H1</option>
+          <option value="h2">H2</option>
+          <option value="h3">H3</option>
         </select>
-        <select id=\"fontSize\">
-          <option value=\"\">Размер</option>
-          <option value=\"2\">13</option>
-          <option value=\"3\">16</option>
-          <option value=\"4\">18</option>
-          <option value=\"5\">24</option>
-          <option value=\"6\">32</option>
+        <select id="fontSelect" title="Шрифт">
+          <option value="">Шрифт</option>
+          <option value="Arial">Arial</option>
+          <option value="'Helvetica Neue'">Helvetica</option>
+          <option value="'Times New Roman'">Times New Roman</option>
+          <option value="Georgia">Georgia</option>
+          <option value="Garamond">Garamond</option>
+          <option value="Verdana">Verdana</option>
+          <option value="'Trebuchet MS'">Trebuchet MS</option>
+          <option value="Tahoma">Tahoma</option>
+          <option value="'Courier New'">Courier New</option>
+          <option value="Consolas">Consolas</option>
+          <option value="'Comic Sans MS'">Comic Sans</option>
+          <option value="Impact">Impact</option>
+          <option value="'Palatino Linotype'">Palatino</option>
+          <option value="'Book Antiqua'">Book Antiqua</option>
+          <option value="'Lucida Console'">Lucida Console</option>
+          <option value="'Lucida Sans'">Lucida Sans</option>
+          <option value="Calibri">Calibri</option>
+          <option value="Cambria">Cambria</option>
+          <option value="Candara">Candara</option>
+          <option value="Century">Century</option>
+          <option value="'Franklin Gothic'">Franklin Gothic</option>
+          <option value="'Century Gothic'">Century Gothic</option>
+          <option value="Segoe UI">Segoe UI</option>
+          <option value="'Apple System'">System</option>
+          <option value="Optima">Optima</option>
+          <option value="Didot">Didot</option>
         </select>
-        <input id=\"foreColor\" type=\"color\" value=\"#111827\" title=\"Цвет текста\">
-        <input id=\"backColor\" type=\"color\" value=\"#ffffff\" title=\"Фон текста\">
-        <button type=\"button\" data-cmd=\"justifyLeft\">Лево</button>
-        <button type=\"button\" data-cmd=\"justifyCenter\">Центр</button>
-        <button type=\"button\" data-cmd=\"justifyRight\">Право</button>
-        <button type=\"button\" data-cmd=\"insertUnorderedList\">• Список</button>
-        <button type=\"button\" data-cmd=\"insertOrderedList\">1. Список</button>
-        <button id=\"linkButton\" type=\"button\">Ссылка</button>
-        <button id=\"imageButton\" type=\"button\">Фото</button>
-        <button id=\"cidButton\" type=\"button\">CID-картинка</button>
-        <button id=\"tableButton\" type=\"button\">Таблица</button>
-        <button id=\"varsButton\" type=\"button\">Переменные</button>
-        <button id=\"sourceButton\" type=\"button\">HTML-код</button>
-        <button id=\"reloadButton\" type=\"button\">Перезагрузить</button>
-        <button id=\"saveButton\" type=\"button\" class=\"primary\">Сохранить</button>
+        <input id="colorPicker" type="color" title="Цвет текста" value="#000000" style="width:36px;height:36px;border:1px solid rgba(148,163,184,0.25);cursor:pointer;border-radius:6px;">
+        <input id="bgColorPicker" type="color" title="Цвет фона" value="#ffffff" style="width:36px;height:36px;border:1px solid rgba(148,163,184,0.25);cursor:pointer;border-radius:6px;">
+        <button data-cmd="justifyLeft">⬅</button>
+        <button data-cmd="justifyCenter">⬆⬇</button>
+        <button data-cmd="justifyRight">➡</button>
+        <button data-cmd="insertUnorderedList">•</button>
+        <button data-cmd="insertOrderedList">1.</button>
+        <button id="insertLink">Ссылка</button>
+        <button id="insertImage">Фото</button>
+        <button id="insertCid">CID</button>
+        <button id="insertEmoji">😀</button>
+        <button id="insertVar">{{}}</button>
+        <button id="toggleSource">HTML</button>
+        <button id="reloadBtn">🔄</button>
+        <button id="saveBtn" style="background:#2563eb;border-color:#2563eb;">💾 Сохранить</button>
       </div>
-      <div id=\"workspace\" class=\"workspace\">
-        <div class=\"editor-pane\">
-          <div id=\"editorSurface\" contenteditable=\"true\" spellcheck=\"true\"></div>
+      <div class="workspace">
+        <div class="editor-pane">
+          <iframe id="editorFrame" title="Визуальный редактор"></iframe>
         </div>
-        <div id=\"sourcePane\" class=\"source-pane hidden\">
-          <div class=\"source-pane-header\">Режим исходного HTML</div>
-          <textarea id=\"sourceEditor\"></textarea>
+        <div id="sourcePane" class="source-pane">
+          <div class="source-header">HTML-код</div>
+          <textarea id="sourceEditor"></textarea>
         </div>
       </div>
-      <div id=\"status\" class=\"footer\">Загрузка редактора...</div>
-      <input id=\"imagePicker\" type=\"file\" accept=\"image/*\" style=\"display:none\">
+      <div class="footer">
+        <span id="status">Инициализация...</span>
+        <span id="unsaved"></span>
+      </div>
+      <div id="emojiOverlay" class="emoji-picker-overlay">
+        <div class="emoji-picker" id="emojiPicker"></div>
+      </div>
     </div>
-
+    <input id="filePicker" type="file" accept="image/*" style="display:none">
     <script>
-      const workspace = document.getElementById('workspace');
+      const frame = document.getElementById('editorFrame');
       const sourcePane = document.getElementById('sourcePane');
       const sourceEditor = document.getElementById('sourceEditor');
-      const editorSurface = document.getElementById('editorSurface');
       const statusNode = document.getElementById('status');
-      const imagePicker = document.getElementById('imagePicker');
+      const unsavedNode = document.getElementById('unsaved');
+      let hasChanges = false;
       let sourceMode = false;
-      let currentHeadHtml = '<meta charset="utf-8">';
-      let currentHtmlAttributes = ' lang="ru"';
-      let currentBodyAttributes = '';
-      let savedRange = null;
+      let originalHtml = '';
+      let originalHead = '';
 
-      function setStatus(message, isError = false) {
-        statusNode.textContent = message;
+      function setStatus(msg, isError) {
+        statusNode.textContent = msg;
         statusNode.style.color = isError ? '#fca5a5' : '#94a3b8';
       }
 
-      function escapeAttribute(value) {
-        return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-      }
-
-      function attributesToString(element) {
-        if (!element || !element.attributes) {
-          return '';
-        }
-        return Array.from(element.attributes)
-          .map((attribute) => ` ${attribute.name}="${escapeAttribute(attribute.value)}"`)
-          .join('');
-      }
-
-      function focusEditor() {
-        editorSurface.focus();
-      }
-
-      function rememberSelection() {
-        if (sourceMode) {
-          return;
-        }
-        const selection = window.getSelection();
-        if (!selection || selection.rangeCount === 0) {
-          return;
-        }
-        const range = selection.getRangeAt(0);
-        if (editorSurface.contains(range.commonAncestorContainer)) {
-          savedRange = range.cloneRange();
+      function markDirty() {
+        if (!hasChanges) {
+          hasChanges = true;
+          unsavedNode.textContent = '● Несохранённые изменения';
+          unsavedNode.className = 'dirty';
         }
       }
 
-      function restoreSelection() {
-        focusEditor();
-        const selection = window.getSelection();
-        if (!selection) {
-          return;
+      function markClean() {
+        hasChanges = false;
+        unsavedNode.textContent = '';
+      }
+
+      function initFrame() {
+        try {
+          const fdoc = frame.contentDocument;
+          fdoc.designMode = 'on';
+          fdoc.body.style.margin = '24px';
+          fdoc.body.style.fontFamily = 'Arial, sans-serif';
+          fdoc.body.style.fontSize = '16px';
+          fdoc.body.style.color = '#111827';
+          fdoc.body.contentEditable = true;
+          fdoc.body.addEventListener('input', function() {
+            markDirty();
+          });
+          frame.contentWindow.focus();
+        } catch (e) {
+          console.error('initFrame error:', e);
         }
-        selection.removeAllRanges();
-        if (savedRange) {
-          selection.addRange(savedRange);
+      }
+
+      function getHtml() {
+        try {
+          const fdoc = frame.contentDocument;
+          const bodyHtml = fdoc.body.innerHTML || '<p></p>';
+          
+          if (!originalHead) {
+            return '<!doctype html>\n<html lang="ru">\n<head>\n<meta charset="utf-8">\n</head>\n<body>\n' + bodyHtml + '\n</body>\n</html>';
+          }
+          
+          return '<!doctype html>\n<html lang="ru">\n<head>\n' + originalHead + '\n</head>\n<body>\n' + bodyHtml + '\n</body>\n</html>';
+        } catch {
+          return originalHtml || sourceEditor.value;
         }
-      }
-
-      function execCommand(command, value = null) {
-        if (sourceMode) {
-          setStatus('Сначала выйдите из режима HTML-кода.', true);
-          return;
-        }
-        restoreSelection();
-        document.execCommand('styleWithCSS', false, true);
-        document.execCommand(command, false, value);
-        rememberSelection();
-        focusEditor();
-      }
-
-      function insertHtml(html) {
-        restoreSelection();
-        document.execCommand('insertHTML', false, html);
-        rememberSelection();
-      }
-
-      function exportDocumentHtml() {
-        return '<!doctype html>\n<html' + currentHtmlAttributes + '>\n<head>\n' + currentHeadHtml + '\n</head>\n<body' + currentBodyAttributes + '>\n' + editorSurface.innerHTML + '\n</body>\n</html>\n';
-      }
-
-      function setEditorHtml(html) {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
-        currentHeadHtml = (doc.head && doc.head.innerHTML.trim()) || '<meta charset="utf-8">';
-        currentHtmlAttributes = attributesToString(doc.documentElement) || ' lang="ru"';
-        currentBodyAttributes = attributesToString(doc.body);
-        editorSurface.innerHTML = (doc.body && doc.body.innerHTML.trim()) || '<p><br></p>';
-        focusEditor();
-        setStatus('Редактор готов. Форматирование доступно.');
       }
 
       async function loadTemplate() {
         try {
-          setStatus('Загрузка шаблона...');
-          const response = await fetch('/api/template');
-          const payload = await response.json();
-          if (!response.ok) {
-            throw new Error(payload.error || 'Ошибка загрузки шаблона');
+          setStatus('Загрузка...');
+          const res = await fetch('/api/template');
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Ошибка загрузки');
+          
+          originalHtml = data.html;
+          document.getElementById('templatePath').textContent = data.path;
+          sourceEditor.value = data.html;
+          
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(data.html, 'text/html');
+          
+          if (doc.head) {
+            originalHead = doc.head.innerHTML;
           }
-          document.getElementById('templatePath').textContent = payload.path;
-          setEditorHtml(payload.html);
-          sourceEditor.value = payload.html;
-        } catch (error) {
-          setStatus(error.message, true);
+          
+          frame.onload = function() {
+            initFrame();
+            if (doc.body) {
+              frame.contentDocument.body.innerHTML = doc.body.innerHTML;
+            }
+            markClean();
+            setStatus('Готов к редактированию');
+          };
+          frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"></head><body></body></html>';
+        } catch (err) {
+          setStatus(err.message, true);
         }
       }
 
       async function saveTemplate() {
         try {
-          const html = sourceMode ? sourceEditor.value : exportDocumentHtml();
-          setStatus('Сохранение шаблона...');
-          const response = await fetch('/api/template', {
+          const html = sourceMode ? sourceEditor.value : getHtml();
+          setStatus('Сохранение...');
+          const res = await fetch('/api/template', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ html }),
+            body: JSON.stringify({ html: html }),
           });
-          const payload = await response.json();
-          if (!response.ok) {
-            throw new Error(payload.error || 'Ошибка сохранения шаблона');
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Ошибка сохранения');
+          
+          originalHtml = html;
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(html, 'text/html');
+          if (doc.head) {
+            originalHead = doc.head.innerHTML;
           }
-          setStatus('Шаблон сохранён: ' + payload.saved_path);
-        } catch (error) {
-          setStatus(error.message, true);
+          
+          markClean();
+          setStatus('Сохранено: ' + data.saved_path);
+        } catch (err) {
+          setStatus(err.message, true);
         }
       }
 
-      function insertLink() {
-        const url = window.prompt('Введите URL', 'https://');
-        if (!url) {
-          return;
-        }
-        execCommand('createLink', url);
-      }
-
-      function insertCidImage() {
-        const alias = window.prompt('Введите ключ картинки для inline_images', 'hero');
-        if (!alias) {
-          return;
-        }
-        insertHtml('<img src="cid:{{ inline_images.' + alias + '.cid }}" alt="' + alias + '" style="max-width:100%;height:auto;border:0;">');
-        setStatus('CID-картинка вставлена.');
-      }
-
-      function insertTable() {
-        const rows = Number(window.prompt('Сколько строк?', '2') || '0');
-        const cols = Number(window.prompt('Сколько столбцов?', '2') || '0');
-        if (!rows || !cols) {
-          return;
-        }
-        const cells = Array.from({ length: rows }, () => '<tr>' + Array.from({ length: cols }, () => '<td style="border:1px solid #cbd5e1;padding:8px;">Текст</td>').join('') + '</tr>').join('');
-        insertHtml('<table style="border-collapse:collapse;width:100%;margin:12px 0;">' + cells + '</table>');
-      }
-
-      function insertVariable() {
-        const value = window.prompt('Переменная: subject, recipient.email, recipient.name, headline, preheader, body_intro, body_text, cta_label, cta_url', 'recipient.name');
-        if (!value) {
-          return;
-        }
-        insertHtml('{{ ' + value + ' }}');
-      }
-
-      function toggleSource() {
-        sourceMode = !sourceMode;
-        if (sourceMode) {
-          sourceEditor.value = exportDocumentHtml();
-          workspace.classList.add('source-open');
-          sourcePane.classList.remove('hidden');
-          editorSurface.style.display = 'none';
-          setStatus('Режим HTML-кода включён.');
-        } else {
-          setEditorHtml(sourceEditor.value);
-          workspace.classList.remove('source-open');
-          sourcePane.classList.add('hidden');
-          editorSurface.style.display = '';
-          setStatus('Возврат из режима HTML-кода.');
+      function execCmd(cmd, val) {
+        try {
+          frame.contentWindow.focus();
+          frame.contentDocument.execCommand(cmd, false, val || null);
+          markDirty();
+        } catch (err) {
+          console.error('Команда не поддерживается:', cmd);
         }
       }
 
-      document.querySelectorAll('[data-cmd]').forEach((button) => {
-        button.addEventListener('mousedown', (event) => event.preventDefault());
-        button.addEventListener('click', () => execCommand(button.dataset.cmd));
+      document.querySelectorAll('[data-cmd]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          const cmd = btn.getAttribute('data-cmd');
+          if (btn.tagName === 'SELECT') {
+            if (btn.value) execCmd(cmd, btn.value);
+          } else {
+            execCmd(cmd);
+          }
+        });
       });
 
-      document.getElementById('fontName').addEventListener('change', (event) => {
-        if (event.target.value) {
-          execCommand('fontName', event.target.value);
-        }
+      document.getElementById('insertLink').addEventListener('click', function() {
+        const url = prompt('URL:');
+        if (url) execCmd('createLink', url);
       });
 
-      document.getElementById('fontSize').addEventListener('change', (event) => {
-        if (event.target.value) {
-          execCommand('fontSize', event.target.value);
-        }
+      document.getElementById('insertImage').addEventListener('click', function() {
+        document.getElementById('filePicker').click();
       });
 
-      document.getElementById('foreColor').addEventListener('input', (event) => {
-        execCommand('foreColor', event.target.value);
-      });
-
-      document.getElementById('backColor').addEventListener('input', (event) => {
-        execCommand('hiliteColor', event.target.value);
-      });
-
-      document.getElementById('linkButton').addEventListener('mousedown', (event) => event.preventDefault());
-      document.getElementById('linkButton').addEventListener('click', insertLink);
-      document.getElementById('cidButton').addEventListener('mousedown', (event) => event.preventDefault());
-      document.getElementById('cidButton').addEventListener('click', insertCidImage);
-      document.getElementById('tableButton').addEventListener('mousedown', (event) => event.preventDefault());
-      document.getElementById('tableButton').addEventListener('click', insertTable);
-      document.getElementById('varsButton').addEventListener('mousedown', (event) => event.preventDefault());
-      document.getElementById('varsButton').addEventListener('click', insertVariable);
-      document.getElementById('sourceButton').addEventListener('click', toggleSource);
-      document.getElementById('reloadButton').addEventListener('click', loadTemplate);
-      document.getElementById('saveButton').addEventListener('click', saveTemplate);
-      document.getElementById('imageButton').addEventListener('mousedown', (event) => event.preventDefault());
-      document.getElementById('imageButton').addEventListener('click', () => imagePicker.click());
-
-      imagePicker.addEventListener('change', (event) => {
-        const file = event.target.files && event.target.files[0];
-        if (!file) {
-          return;
-        }
+      document.getElementById('filePicker').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
         const reader = new FileReader();
-        reader.onload = () => {
-          insertHtml('<img src="' + reader.result + '" alt="' + file.name.replace(/"/g, '') + '" style="max-width:100%;height:auto;border:0;">');
-          setStatus('Фото вставлено в письмо.');
-          imagePicker.value = '';
+        reader.onload = function() {
+          execCmd('insertImage', reader.result);
+          setStatus('Фото вставлено');
         };
         reader.readAsDataURL(file);
+        e.target.value = '';
       });
 
-      editorSurface.addEventListener('mouseup', rememberSelection);
-      editorSurface.addEventListener('keyup', rememberSelection);
-      editorSurface.addEventListener('focus', rememberSelection);
-      editorSurface.addEventListener('input', rememberSelection);
+      document.getElementById('insertCid').addEventListener('click', function() {
+        const alias = prompt('Ключ картинки (например: hero)');
+        if (alias) {
+          frame.contentWindow.focus();
+          const img = '<img src="cid:{{ inline_images.' + alias + '.cid }}" alt="' + alias + '" style="max-width:100%;height:auto;">';
+          frame.contentDocument.execCommand('insertHTML', false, img);
+          markDirty();
+        }
+      });
+
+      document.getElementById('insertVar').addEventListener('click', function() {
+        const vars = ['subject', 'recipient.name', 'recipient.email', 'headline', 'preheader', 'body_intro', 'body_text', 'cta_label', 'cta_url'];
+        const msg = 'Переменная:\n' + vars.join('\n');
+        const v = prompt(msg);
+        if (v) {
+          frame.contentWindow.focus();
+          frame.contentDocument.execCommand('insertHTML', false, '{{ ' + v + ' }}');
+          markDirty();
+        }
+      });
+
+      document.getElementById('fontSelect').addEventListener('change', function() {
+        if (this.value) {
+          execCmd('fontName', this.value);
+          this.value = '';
+        }
+      });
+
+      document.getElementById('colorPicker').addEventListener('input', function() {
+        execCmd('foreColor', this.value);
+      });
+
+      document.getElementById('bgColorPicker').addEventListener('input', function() {
+        execCmd('backColor', this.value);
+      });
+
+      document.getElementById('insertEmoji').addEventListener('click', function() {
+        showEmojiPicker();
+      });
+
+      function showEmojiPicker() {
+        const overlay = document.getElementById('emojiOverlay');
+        const picker = document.getElementById('emojiPicker');
+        picker.innerHTML = '';
+
+        const categories = {
+          'Улыбки': ['😀', '😃', '😄', '😁', '😆', '😅', '🤣', '😂', '🙂', '🙃', '😉', '😊', '😇', '🥰', '😍', '🤩', '😘', '😗', '😚', '😙', '🥲', '😋', '😛', '😜', '🤪', '😌', '😔', '😑', '😐', '😏', '🥱'],
+          'Любовь': ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '🤎', '💔', '💕', '💞', '💓', '💗', '💖', '💘', '💝', '💟', '💌'],
+          'Жесты': ['👋', '🤚', '🖐️', '✋', '🖖', '👌', '🤌', '🤏', '✌️', '🤞', '🫰', '🤟', '🤘', '🤙', '👍', '👎', '✊', '👊', '🤛', '🤜', '👏', '🙌', '👐', '🤲', '🤝', '🤜', '💪', '🦾', '🦿', '🦵', '🦶'],
+          'Звезды': ['⭐', '🌟', '✨', '💫', '🌠', '🔆', '☀️', '🌤️', '⛅', '🌥️', '☁️', '🌦️', '🌧️', '⛈️', '🌩️', '🌨️', '❄️', '☃️', '⛄', '🌬️', '💨', '💧', '💦'],
+          'Дела': ['📢', '📣', '📯', '🔔', '🔕', '📻', '📱', '📞', '☎️', '📟', '📠', '📧', '📨', '📩', '📤', '📥', '📦', '📫', '📪', '📬', '📭', '📮', '✏️', '✒️', '🖋️', '🖊️', '📝'],
+          'Объекты': ['🎁', '🎀', '🎈', '🎉', '🎊', '🎎', '🏆', '🏅', '⚽', '⚾', '🥎', '🎾', '🏐', '🏈', '🏉', '🎯', '🎳', '🎣', '🎬', '🎤', '🎧', '🎼', '🎹', '🎸', '🎺', '🎷'],
+          'Еда': ['🍕', '🍔', '🍟', '🌭', '🥪', '🌮', '🌯', '🥙', '🧆', '🍗', '🍖', '🌶️', '🍝', '🍜', '🍲', '🍛', '🍣', '🍱', '🥟', '🦪', '🍤', '🍙', '🍚', '🍘', '🍥', '🥠', '🥮', '🍢', '🍡', '🍧', '🍨', '🍦', '🍰', '🎂', '🧁', '🍮', '🍭', '🍬', '🍫', '🍿', '🍩', '🍪', '🌰', '🍯', '🥛', '☕', '🍵', '🍶', '🍾', '🍷', '🍸', '🍹', '🍺', '🍻'],
+          'Путешествия': ['✈️', '🚀', '🛸', '🚁', '🛶', '⛵', '🚤', '🛳️', '⛴️', '🛥️', '🚢', '🚧', '🚨', '🚔', '🚍', '🚘', '🚖', '🚡', '🚠', '🎡', '🎢', '🏰', '🎠', '⛲', '⛺', '🏖️', '🏝️', '🌋', '⛰️', '🏔️', '🗻', '🗽', '🗼', '🏛️', '⌚', '📱', '📲', '💻', '⌨️', '🖥️', '🖨️', '🖱️', '🖲️', '🕹️'],
+          'Животные': ['🐶', '🐱', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐮', '🐷', '🐽', '🐸', '🐵', '🙈', '🙉', '🙊', '🐒', '🐔', '🐧', '🐦', '🐤', '🦆', '🦅', '🦉', '🦇', '🐺', '🐗', '🐴', '🦄', '🐝', '🪱', '🐛', '🦋', '🐌', '🐞', '🐜', '🪰', '🐢', '🐍', '🦎', '🦖', '🦕', '🐙', '🦑', '🦐', '🦞', '🦀', '🐡', '🐠', '🐟', '🐬', '🐳', '🐋', '🦈', '🐊', '🐅', '🐆', '🦓', '🦍', '🦧', '🐘', '🦛', '🦏', '🐪', '🐫', '🦒', '🦘', '🐃', '🐂', '🐄', '🐎', '🐖', '🐏', '🐑', '🧔', '🐐'],
+          'Природа': ['🌲', '🌳', '🌴', '🌵', '🌾', '🌿', '☘️', '🍀', '🍁', '🍂', '🍃', '🌺', '🌻', '🌹', '🥀', '🌷', '🌱', '🌲', '🏵️', '💐', '🌞', '🌝', '🌛', '🌜', '⭐', '🌟', '✨', '⚡', '☄️', '💥', '🔥', '🌪️', '🌈', '☀️', '🌤️', '⛅', '🌥️', '☁️'],
+        };
+
+        for (const [category, emojis] of Object.entries(categories)) {
+          const catDiv = document.createElement('div');
+          catDiv.className = 'emoji-category';
+          
+          const title = document.createElement('div');
+          title.className = 'emoji-category-title';
+          title.textContent = category;
+          catDiv.appendChild(title);
+          
+          const grid = document.createElement('div');
+          grid.className = 'emoji-grid';
+          
+          emojis.forEach(function(emoji) {
+            const btn = document.createElement('button');
+            btn.className = 'emoji-btn';
+            btn.textContent = emoji;
+            btn.addEventListener('click', function() {
+              frame.contentWindow.focus();
+              frame.contentDocument.execCommand('insertHTML', false, emoji);
+              markDirty();
+              overlay.classList.remove('visible');
+            });
+            grid.appendChild(btn);
+          });
+          
+          catDiv.appendChild(grid);
+          picker.appendChild(catDiv);
+        }
+
+        const closeDiv = document.createElement('div');
+        closeDiv.className = 'emoji-close';
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = 'Закрыть';
+        closeBtn.addEventListener('click', function() {
+          overlay.classList.remove('visible');
+        });
+        closeDiv.appendChild(closeBtn);
+        picker.appendChild(closeDiv);
+
+        overlay.classList.add('visible');
+      }
+
+      document.getElementById('emojiOverlay').addEventListener('click', function(e) {
+        if (e.target === this) {
+          this.classList.remove('visible');
+        }
+      });
+
+      document.getElementById('toggleSource').addEventListener('click', function() {
+        sourceMode = !sourceMode;
+        if (sourceMode) {
+          sourceEditor.value = getHtml();
+          sourcePane.classList.add('visible');
+          frame.style.display = 'none';
+          setStatus('HTML-режим включен');
+        } else {
+          try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(sourceEditor.value, 'text/html');
+            originalHtml = sourceEditor.value;
+            if (doc.head) {
+              originalHead = doc.head.innerHTML;
+            }
+            frame.contentDocument.body.innerHTML = doc.body.innerHTML;
+          } catch (err) {
+            setStatus('Ошибка в HTML', true);
+            return;
+          }
+          sourcePane.classList.remove('visible');
+          frame.style.display = '';
+          markClean();
+          setStatus('Вернулись к визуальному редактору');
+        }
+      });
+
+      document.getElementById('reloadBtn').addEventListener('click', loadTemplate);
+      document.getElementById('saveBtn').addEventListener('click', saveTemplate);
 
       loadTemplate();
     </script>

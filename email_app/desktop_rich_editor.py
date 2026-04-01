@@ -9,7 +9,7 @@ import re
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -39,6 +39,8 @@ class ModernDesktopRichEditor(QMainWindow):
         super().__init__()
         self.template_path = template_path.resolve()
         self.source_mode = False
+        self._has_unsaved_changes = False
+        self._suppress_change_tracking = False
 
         self.setWindowTitle(f"📝 HTML Editor — {self.template_path.name}")
         self.setStyleSheet(self._get_dark_stylesheet())
@@ -86,6 +88,9 @@ class ModernDesktopRichEditor(QMainWindow):
         layout.addWidget(footer_widget)
 
         self._build_toolbars()
+        self.save_feedback_timer = QTimer(self)
+        self.save_feedback_timer.setSingleShot(True)
+        self.save_feedback_timer.timeout.connect(self._reset_save_button_feedback)
         self.doctype = "<!doctype html>"
         self.html_open_tag = "<html lang=\"ru\">"
         self.body_start_tag = "<body>"
@@ -93,7 +98,8 @@ class ModernDesktopRichEditor(QMainWindow):
         self.head_html = ""
         self.load_template()
         self.update_char_count()
-        self.editor.textChanged.connect(self.update_char_count)
+        self.editor.textChanged.connect(self._on_text_changed)
+        self.source_editor.textChanged.connect(self._on_text_changed)
 
     def _get_dark_stylesheet(self) -> str:
         """Return modern dark theme stylesheet."""
@@ -219,10 +225,30 @@ class ModernDesktopRichEditor(QMainWindow):
 
         # Вид
         view_toolbar = self._create_toolbar("Вид", "view")
-        self._add_button(view_toolbar, "Сохранить", self.save_template, "Ctrl+S")
+        self.save_button = self._add_button(view_toolbar, "Сохранить", self.save_template, "Ctrl+S")
         self._add_button(view_toolbar, "Перезагрузить", self.load_template, "Ctrl+R")
         view_toolbar.addSeparator()
         self._add_button(view_toolbar, "Исходный код", self.toggle_source_mode, "Ctrl+`")
+
+    def _on_text_changed(self) -> None:
+        self.update_char_count()
+        if self._suppress_change_tracking:
+            return
+        self._has_unsaved_changes = True
+        self.status_label.setText("● Есть несохранённые изменения")
+
+    def _reset_save_button_feedback(self) -> None:
+        self.save_button.setText("Сохранить")
+        self.save_button.setStyleSheet("")
+
+    def _mark_saved(self) -> None:
+        self._has_unsaved_changes = False
+        self.status_label.setText(f"✓ Сохранено: {self.template_path}")
+        self.save_button.setText("✓ Сохранено")
+        self.save_button.setStyleSheet(
+            "background-color: #2e7d32; color: #ffffff; border: none; border-radius: 3px; padding: 4px 8px; font-weight: bold;"
+        )
+        self.save_feedback_timer.start(1800)
 
     def change_line_spacing(self, value: int) -> None:
         """Изменить межстрочный интервал (проценты)."""
@@ -499,6 +525,7 @@ class ModernDesktopRichEditor(QMainWindow):
             self.status_label.setText(f"✗ Файл не найден: {self.template_path}")
             return
 
+        self._suppress_change_tracking = True
         content = self.template_path.read_text(encoding="utf-8")
 
         # Save raw original structure to preserve metadata and theme-related attributes
@@ -522,6 +549,8 @@ class ModernDesktopRichEditor(QMainWindow):
         self.editor.setHtml(self.body_html)
         self.source_editor.setPlainText(content)
         self.status_label.setText(f"✓ Загружено: {self.template_path}")
+        self._has_unsaved_changes = False
+        self._suppress_change_tracking = False
         self.update_char_count()
 
     def save_template(self) -> None:
@@ -539,7 +568,7 @@ class ModernDesktopRichEditor(QMainWindow):
 
         self.template_path.write_text(content, encoding="utf-8")
         self.source_editor.setPlainText(content)
-        self.status_label.setText(f"✓ Сохранено: {self.template_path}" )
+        self._mark_saved()
 
     def update_char_count(self) -> None:
         """Update character count."""

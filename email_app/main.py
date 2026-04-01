@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from .campaign_queue import CampaignQueueError, load_campaign_queue, run_campaign_queue, save_campaign_queue
@@ -9,6 +10,42 @@ from .modern_gui import launch_modern_gui
 from .presets import CampaignPreset, PresetError, load_preset, save_preset
 from .service import CampaignError, render_preview, run_campaign, run_preflight
 from .stats import StatsError, filter_history_records, load_history_records, summarize_history_records
+
+
+def _get_base_dir() -> Path:
+    """Return stable project/app directory across script and frozen exe runs."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+
+    def is_project_root(path: Path) -> bool:
+        return (path / "config" / "settings.yaml").exists() or (path / "config" / "settings.example.yaml").exists()
+
+    module_root = Path(__file__).resolve().parent.parent
+    if is_project_root(module_root):
+        return module_root
+
+    cwd = Path.cwd().resolve()
+    if is_project_root(cwd):
+        return cwd
+
+    for parent in cwd.parents:
+        if is_project_root(parent):
+            return parent
+
+    return cwd
+
+
+def _to_portable_path(value: str, base_dir: Path) -> str:
+    text = str(value).strip()
+    if not text:
+        return text
+    candidate = Path(text)
+    if not candidate.is_absolute():
+        return text
+    try:
+        return str(candidate.resolve().relative_to(base_dir.resolve()))
+    except ValueError:
+        return text
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -126,7 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    base_dir = Path.cwd()
+    base_dir = _get_base_dir()
 
     try:
         if args.preset:
@@ -143,9 +180,9 @@ def main() -> int:
             saved_path = save_preset(
                 base_dir / args.save_preset,
                 CampaignPreset(
-                    config=args.config,
-                    recipients=args.recipients,
-                    templates=args.templates,
+                    config=_to_portable_path(args.config, base_dir),
+                    recipients=_to_portable_path(args.recipients, base_dir),
+                    templates=_to_portable_path(args.templates, base_dir),
                     template=args.template,
                     delay_seconds=args.delay_seconds,
                     dry_run=args.dry_run,
@@ -159,9 +196,9 @@ def main() -> int:
                 base_dir / args.export_queue,
                 [
                     CampaignPreset(
-                        config=args.config,
-                        recipients=args.recipients,
-                        templates=args.templates,
+                        config=_to_portable_path(args.config, base_dir),
+                        recipients=_to_portable_path(args.recipients, base_dir),
+                        templates=_to_portable_path(args.templates, base_dir),
                         template=args.template,
                         delay_seconds=args.delay_seconds,
                         dry_run=args.dry_run,

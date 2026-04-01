@@ -444,6 +444,7 @@ def run_campaign(
     template_override: str | None = None,
     random_attachments_folder_override: str | None = None,
     use_proxy: bool = True,
+    proxy_file_override: str | None = None,
     delay_override: float | None = None,
     rate_limit_per_minute: int | None = None,
     retry_attempts: int | None = None,
@@ -451,6 +452,8 @@ def run_campaign(
     parallel_smtp_enabled: bool | None = None,
     parallel_smtp_accounts: int | None = None,
     batch_interval_seconds: float | None = None,
+    reply_to_override: str | None = None,
+    reply_to_mode_override: str | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> CampaignSummary:
     try:
@@ -472,6 +475,13 @@ def run_campaign(
         config.delivery.parallel_smtp_accounts = max(1, int(parallel_smtp_accounts))
     if batch_interval_seconds is not None:
         config.delivery.batch_interval_seconds = max(0.0, float(batch_interval_seconds))
+    if reply_to_override is not None:
+        normalized_reply_to = str(reply_to_override).strip()
+        config.message.reply_to = normalized_reply_to or None
+
+    reply_to_mode = (str(reply_to_mode_override).strip().lower() if reply_to_mode_override is not None else "random")
+    if reply_to_mode not in {"random", "fixed"}:
+        reply_to_mode = "random"
 
     if random_attachments_folder_override:
         config.message.random_attachments_folder = random_attachments_folder_override
@@ -502,12 +512,14 @@ def run_campaign(
     history_jsonl_path = _resolve_output_path(base_dir, config.delivery.history_jsonl)
     mailers = [SMTPMailer(settings) for settings in config.smtp_accounts]
     # --- Загрузка списка прокси ---
-    proxy_file = base_dir / "config" / "proxies.txt"
+    proxy_file = (base_dir / (proxy_file_override or "config/proxies.txt"))
     proxies = load_proxies(proxy_file) if proxy_file.exists() else []
 
     # --- Reply-To list ---
     reply_to_candidates = _load_reply_to_list(base_dir)
     if not reply_to_candidates and config.message.reply_to:
+        reply_to_candidates = [config.message.reply_to]
+    if reply_to_mode == "fixed" and config.message.reply_to:
         reply_to_candidates = [config.message.reply_to]
 
     delay_seconds = config.delivery.delay_seconds if delay_override is None else max(delay_override, 0.0)
@@ -575,8 +587,13 @@ def run_campaign(
         if random_attachment_files:
             recipient_attachment_paths.append(random.choice(random_attachment_files))
 
+        reply_to_info = selected_reply_to or "not-set"
+
         if dry_run:
-            message = f"[DRY-RUN] {recipient_index}/{len(recipients)} подготовлено для {recipient.email} (smtp={smtp_account}, proxy={proxy_info})"
+            message = (
+                f"[DRY-RUN] {recipient_index}/{len(recipients)} подготовлено для {recipient.email} "
+                f"(smtp={smtp_account}, proxy={proxy_info}, reply_to={reply_to_info})"
+            )
             status = "dry-run"
             error_msg = ""
             success_delta = 1
@@ -594,14 +611,20 @@ def run_campaign(
                     retry_attempts=config.delivery.retry_attempts,
                     retry_backoff_seconds=config.delivery.retry_backoff_seconds,
                 )
-                message = f"[OK] {recipient_index}/{len(recipients)} отправлено: {recipient.email} через {smtp_account} proxy={proxy_info}"
+                message = (
+                    f"[OK] {recipient_index}/{len(recipients)} отправлено: {recipient.email} "
+                    f"через {smtp_account} proxy={proxy_info} reply_to={reply_to_info}"
+                )
                 status = "sent"
                 error_msg = ""
                 success_delta = 1
                 fail_delta = 0
                 sent = True
             except Exception as error:
-                message = f"[ERROR] {recipient_index}/{len(recipients)} {recipient.email}: {error}"
+                message = (
+                    f"[ERROR] {recipient_index}/{len(recipients)} {recipient.email}: {error} "
+                    f"(smtp={smtp_account}, proxy={proxy_info}, reply_to={reply_to_info})"
+                )
                 status = "error"
                 error_msg = str(error)
                 success_delta = 0
@@ -622,7 +645,7 @@ def run_campaign(
         }
 
     logger.info(
-        "Старт кампании: dry_run=%s, recipients=%s, template=%s, attachments=%s, inline_images=%s, smtp_accounts=%s, dedupe=%s",
+        "Старт кампании: dry_run=%s, recipients=%s, template=%s, attachments=%s, inline_images=%s, smtp_accounts=%s, dedupe=%s, reply_to_mode=%s, reply_to_candidates=%s, config_reply_to=%s",
         dry_run,
         len(recipients),
         template_name,
@@ -630,6 +653,9 @@ def run_campaign(
         len(inline_image_paths),
         len(mailers),
         config.delivery.skip_previously_sent,
+        reply_to_mode,
+        len(reply_to_candidates),
+        config.message.reply_to or "",
     )
     emit(f"Лог: {log_path}")
     emit(f"История CSV: {history_csv_path}")

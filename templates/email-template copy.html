@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+</head>
+<body>
+
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" class="wrapper">
+      <tbody><tr>
+        <td align="center">
+          <table role="presentation" width="680" cellspacing="0" cellpadding="0" class="container">
+            <tbody><tr>
+              <td class="hero">
+                <div class="brand-badge"><b>Ваш бренд</b></div>
+                {% if inline_images.hero %}
+                <p class="hero-image">
+                  <img src="cid:{{ inline_images.hero.cid }}" alt="Hero" style="display:block;max-width:168px;height:auto;border:0;">
+                </p>
+                {% endif %}
+                <h1 class="title">{{ приветствие }}</h1>
+                <p class="subtitle">{{ кратко }}</p>
+              </td>
+            </tr>
+            <tr>
+              <td class="content">
+                <p class="greeting">Здравствуйте{% if recipient.имя %}, {{ recipient.имя }}{% endif %}!</p>
+                <p class="paragraph">{{ вступление }}</p>
+
+                <div class="highlight-box">
+                  <p class="highlight-label">Коротко</p>
+                  <p class="highlight-text">{{ текст }}</p>
+                </div>
+
+                {% if ссылка_кнопки and кнопка %}
+                <div class="cta-wrap">
+                  <a href="{{ ссылка_кнопки }}" class="button">{{ кнопка }}</a>
+                </div>
+                {% endif %}
+
+                <div class="meta">
+                  <div class="meta-card">
+                    <p class="meta-title">Почему это письмо легко читать</p>
+                    <p class="meta-text">Чистая структура, крупный заголовок, мягкие отступы и аккуратный акцент на основном действии.</p>
+                  </div>
+                </div>
+
+                <p class="signature">С уважением,<br>{{ sender_name | default('Команда поддержки') }}</p>
+              </td>
+            </tr>
+          </tbody></table>
+        </td>
+      </tr>
+    </tbody></table>
+  
+
+
+</body>
+</html>

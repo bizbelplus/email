@@ -8,7 +8,7 @@
 **Возможности:**
 - SMTP (TLS/SSL)
 - Прокси (SOCKS5, HTTP(S), с авторизацией)
-- Пул SMTP-аккаунтов (CSV, ротация)
+- Пул SMTP-аккаунтов (TXT/CSV, ротация)
 - HTML-шаблоны через Jinja2
 - Персонализация по CSV и переменным
 - Вложения и inline-изображения (cid:)
@@ -61,7 +61,7 @@ smtp:
    # proxy_type: socks5  # или http, https
    # proxy_user: null
    # proxy_pass: null
-   # accounts_file: config/smtp_accounts.example.csv
+   # accounts_file: config/smtp_accounts.example.txt
 
 message:
    subject: "Пример HTML-письма"
@@ -101,7 +101,15 @@ email,name,company
 user@example.com,Иван,Example LLC
 ```
 
-## Пример пула SMTP-аккаунтов (CSV)
+## Пример пула SMTP-аккаунтов (TXT)
+
+```txt
+# host|port|username|password|from_email|from_name|use_tls|use_ssl|timeout_seconds
+smtp.example.com|587|mailer1@example.com|CHANGE_ME|mailer1@example.com|Mailer One|true|false|30
+smtp.example.com|587|mailer2@example.com|CHANGE_ME|mailer2@example.com|Mailer Two|true|false|30
+```
+
+Также поддерживается CSV:
 
 ```csv
 host,port,username,password,from_email,from_name,use_tls,use_ssl,timeout_seconds
@@ -157,7 +165,8 @@ python -m email_app --config config/settings.yaml
 - [email_app/modern_gui.py](email_app/modern_gui.py) — modern-интерфейс на `customtkinter`
 - [templates/newsletter.html](templates/newsletter.html) — пример шаблона
 - [config/settings.example.yaml](config/settings.example.yaml) — пример конфига
-- [config/smtp_accounts.example.csv](config/smtp_accounts.example.csv) — пример пула SMTP-аккаунтов
+- [config/smtp_accounts.example.txt](config/smtp_accounts.example.txt) — пример пула SMTP-аккаунтов (TXT)
+- [config/smtp_accounts.example.csv](config/smtp_accounts.example.csv) — пример пула SMTP-аккаунтов (CSV)
 - [recipients.csv](recipients.csv) — пример базы получателей
 - [files/example.txt](files/example.txt) — пример вложения
 - [files/example-inline.svg](files/example-inline.svg) — пример inline-изображения
@@ -401,3 +410,11 @@ message:
 - Если файл отсутствует — используется стандартная логика (прокси из конфига или из аккаунта).
 
 Прокси подставляются независимо от SMTP-аккаунта!
+
+На Windows клонируешь:
+git clone <url>
+cd Email (или имя папки)
+Если ещё нет venv:
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt

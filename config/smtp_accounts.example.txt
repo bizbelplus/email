@@ -1,0 +1,30 @@
+# Формат строки:
+# host|port|username|password|from_email|from_name|use_tls|use_ssl|timeout_seconds
+#
+# Расшифровка полей:
+# host             — SMTP-сервер, например smtp.gmail.com
+# port             — SMTP-порт, обычно 587 для TLS или 465 для SSL
+# username         — логин SMTP-аккаунта
+# password         — пароль или app password SMTP-аккаунта
+# from_email       — email отправителя, который увидит получатель
+# from_name        — имя отправителя, которое увидит получатель
+# use_tls          — использовать TLS: true/false
+# use_ssl          — использовать SSL: true/false
+# timeout_seconds  — таймаут SMTP-соединения в секундах
+#
+# Важно:
+# - use_tls=true и use_ssl=true одновременно включать нельзя
+# - если use_tls/use_ssl/timeout_seconds не указаны, используются значения по умолчанию:
+#   use_tls=true, use_ssl=false, timeout_seconds=30
+# - одна строка = один SMTP-аккаунт
+# - приложение использует эти строки для ротации/параллельной отправки
+# Поля use_tls, use_ssl и timeout_seconds опциональны.
+# Пустые строки и строки, начинающиеся с #, игнорируются.
+
+smtp.gmail.com|587|bxbxeydb@gmail.com|qfdogiizhqexvzcu|bxbxeydb@gmail.com|Gmail 1|true|false|30
+smtp.gmail.com|587|urebecuha871@gmail.com|ijasqcorfcpofign|urebecuha871@gmail.com|Gmail 2|true|false|30
+smtp.gmail.com|587|hagudutub846@gmail.com|sjappfcttnzulaso|hagudutub846@gmail.com|Gmail 3|true|false|30
+smtp.gmail.com|587|lerchrabrichry7582@gmail.com|ytixqvoxpushtxwn|lerchrabrichry7582@gmail.com|Gmail 4|true|false|30
+smtp.gmail.com|587|ipotowifuzuz10@gmail.com|tidutoyptwuqlljp|ipotowifuzuz10@gmail.com|Gmail 5|true|false|30
+smtp.gmail.com|587|dickksonn744@gmail.com|uzmqyiekekrbprjk|dickksonn744@gmail.com|Gmail 6|true|false|30
+smtp.gmail.com|587|example@gmail.com|pass|example@gmail.com|Example|true|false|30

@@ -13,6 +13,14 @@ class ConfigError(ValueError):
     """Raised when config data is invalid."""
 
 
+def _parse_bool(value: Any, default: bool) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _require(mapping: dict[str, Any], key: str) -> Any:
     value = mapping.get(key)
     if value in (None, ""):
@@ -29,8 +37,8 @@ def _build_smtp_settings(mapping: dict[str, Any]) -> SMTPSettings:
         password=str(_require(mapping, "password")),
         from_email=str(_require(mapping, "from_email")),
         from_name=str(_require(mapping, "from_name")),
-        use_tls=bool(mapping.get("use_tls", True)),
-        use_ssl=bool(mapping.get("use_ssl", False)),
+        use_tls=_parse_bool(mapping.get("use_tls", True), True),
+        use_ssl=_parse_bool(mapping.get("use_ssl", False), False),
         timeout_seconds=int(mapping.get("timeout_seconds", 30)),
         proxy_host=mapping.get("proxy_host"),
         proxy_port=int(mapping["proxy_port"]) if mapping.get("proxy_port") else None,
@@ -45,10 +53,7 @@ def _build_smtp_settings(mapping: dict[str, Any]) -> SMTPSettings:
     return smtp
 
 
-def _load_smtp_accounts(accounts_file: Path) -> list[SMTPSettings]:
-    if not accounts_file.exists():
-        raise ConfigError(f"CSV-файл SMTP-аккаунтов не найден: {accounts_file}")
-
+def _load_smtp_accounts_csv(accounts_file: Path) -> list[SMTPSettings]:
     with accounts_file.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         accounts: list[SMTPSettings] = []
@@ -56,13 +61,55 @@ def _load_smtp_accounts(accounts_file: Path) -> list[SMTPSettings]:
             normalized = {key: (value or "").strip() for key, value in row.items() if key}
             if not any(normalized.values()):
                 continue
-            normalized["use_tls"] = normalized.get("use_tls", "true").lower() in {"1", "true", "yes", "on"}
-            normalized["use_ssl"] = normalized.get("use_ssl", "false").lower() in {"1", "true", "yes", "on"}
+            normalized["use_tls"] = _parse_bool(normalized.get("use_tls", "true"), True)
+            normalized["use_ssl"] = _parse_bool(normalized.get("use_ssl", "false"), False)
             normalized["timeout_seconds"] = int(normalized.get("timeout_seconds", "30") or 30)
             accounts.append(_build_smtp_settings(normalized))
+    return accounts
+
+
+def _load_smtp_accounts_txt(accounts_file: Path) -> list[SMTPSettings]:
+    accounts: list[SMTPSettings] = []
+    with accounts_file.open("r", encoding="utf-8-sig") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            parts = [item.strip() for item in line.split("|")]
+            if len(parts) < 6:
+                raise ConfigError(
+                    "TXT-файл SMTP-аккаунтов должен содержать минимум 6 полей через '|': "
+                    "host|port|username|password|from_email|from_name"
+                    f" (строка {line_number})"
+                )
+
+            mapping: dict[str, Any] = {
+                "host": parts[0],
+                "port": parts[1],
+                "username": parts[2],
+                "password": parts[3],
+                "from_email": parts[4],
+                "from_name": parts[5],
+                "use_tls": _parse_bool(parts[6], True) if len(parts) > 6 else True,
+                "use_ssl": _parse_bool(parts[7], False) if len(parts) > 7 else False,
+                "timeout_seconds": int(parts[8]) if len(parts) > 8 and parts[8] else 30,
+            }
+            accounts.append(_build_smtp_settings(mapping))
+    return accounts
+
+
+def _load_smtp_accounts(accounts_file: Path) -> list[SMTPSettings]:
+    if not accounts_file.exists():
+        raise ConfigError(f"Файл SMTP-аккаунтов не найден: {accounts_file}")
+
+    if accounts_file.suffix.lower() == ".txt":
+        accounts = _load_smtp_accounts_txt(accounts_file)
+    else:
+        accounts = _load_smtp_accounts_csv(accounts_file)
 
     if not accounts:
-        raise ConfigError("CSV-файл SMTP-аккаунтов пуст")
+        raise ConfigError("Файл SMTP-аккаунтов пуст")
 
     return accounts
 

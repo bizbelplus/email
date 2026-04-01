@@ -28,6 +28,7 @@ from .stats import (
     load_history_records,
     summarize_history_records,
 )
+from .tinymce_editor import RichEditorError, RichTemplateEditorServer
 
 
 class ModernEmailAppGUI:
@@ -44,6 +45,7 @@ class ModernEmailAppGUI:
         self.preview_window = None
         self.preview_html_widget = None
         self.preview_source_text = None
+        self.rich_editor_server = RichTemplateEditorServer(base_dir)
 
         self.root = ctk.CTk()
         self.root.title("Email App – Modern SMTP Campaign Manager")
@@ -58,6 +60,7 @@ class ModernEmailAppGUI:
         self.templates_var = ctk.StringVar(value="templates")
         self.template_var = ctk.StringVar(value="")
         self.attachments_folder_var = ctk.StringVar(value="")
+        self.proxy_file_var = ctk.StringVar(value="config/proxies.txt")
         self.external_editor_path = ctk.StringVar(value="")
         self.proxy_enabled_var = ctk.BooleanVar(value=True)
         self.live_preview_var = ctk.BooleanVar(value=True)
@@ -77,6 +80,7 @@ class ModernEmailAppGUI:
         self.editor_live_job = None
 
         self._build()
+        self._on_theme_change(self.theme_var.get())
         if self.current_preset_path:
             self._load_preset(self.current_preset_path, silent=True)
         self._refresh_templates()
@@ -217,6 +221,12 @@ class ModernEmailAppGUI:
         proxy_section = self.ctk.CTkFrame(template_section, fg_color="transparent")
         proxy_section.pack(fill="x", padx=12, pady=4)
         self.ctk.CTkCheckBox(proxy_section, text="Использовать прокси", variable=self.proxy_enabled_var, onvalue=True, offvalue=False).pack(anchor="w")
+        proxy_file_row = self.ctk.CTkFrame(proxy_section, fg_color="transparent")
+        proxy_file_row.pack(fill="x", pady=(6, 0))
+        proxy_file_row.grid_columnconfigure(1, weight=1)
+        self.ctk.CTkLabel(proxy_file_row, text="Файл прокси:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkEntry(proxy_file_row, textvariable=self.proxy_file_var).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.ctk.CTkButton(proxy_file_row, text="📁", width=36, command=self._select_proxy_file).grid(row=0, column=2)
 
         # === ДЕЙСТВИЯ (Раздел 3) ===
         actions_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
@@ -232,7 +242,7 @@ class ModernEmailAppGUI:
             ("▶️  Старт", self._start_send, 0),
             ("📊 Статистика", self._show_stats, 1),
             ("👁️ Предпросмотр", self._preview_email, 2),
-            ("✏️ Редактор", self._open_template_editor, 3),
+            ("✏️ Редактор HTML", self._open_template_editor, 3),
             ("🎨 Визуальный", self._open_visual_template_editor, 4),
             ("💾 Пресет", self._save_preset_dialog, 5),
         ]
@@ -328,6 +338,14 @@ class ModernEmailAppGUI:
             self.attachments_folder_var.set(self._relative(Path(path)))
             self._update_random_attachment_count()
 
+    def _select_proxy_file(self) -> None:
+        path = filedialog.askopenfilename(
+            initialdir=self.base_dir,
+            filetypes=[("Text files", "*.txt"), ("Все файлы", "*.*")],
+        )
+        if path:
+            self.proxy_file_var.set(self._relative(Path(path)))
+
     def _update_random_attachment_count(self) -> None:
         folder = self.attachments_folder_var.get().strip()
         if not folder:
@@ -354,15 +372,21 @@ class ModernEmailAppGUI:
             self.template_var.set("")
 
     def _pick_random_replyto(self) -> str:
-        # Получить список email из комбобокса (или файла)
-        emails = self.replyto_combo.cget("values")
-        import random
-        emails = [e for e in emails if e.strip()]
+        emails = [e.strip() for e in self.replyto_combo.cget("values") if str(e).strip()]
+        selected = self.replyto_var.get().strip()
+
+        if self.replyto_mode_var.get() == "fixed":
+            if selected:
+                return selected
+            if emails:
+                self.replyto_var.set(emails[0])
+                return emails[0]
 
         if emails:
-            return random.choice(emails)
+            chosen = random.choice(emails)
+            self.replyto_var.set(chosen)
+            return chosen
 
-        # fallback: взять reply_to из конфига, если он задан
         try:
             config = load_config(self.base_dir / self.config_var.get())
             if config.message.reply_to:
@@ -425,8 +449,9 @@ class ModernEmailAppGUI:
             return
         self.replyto_var.set(reply_to_random)
 
+        mode_label = "фиксированный" if self.replyto_mode_var.get() == "fixed" else "случайный"
         self.status_var.set("⏳ Запуск...")
-        self._append_log(f"▶ Старт задачи (Reply-To: {reply_to_random})")
+        self._append_log(f"▶ Старт задачи (Reply-To: {reply_to_random}, режим: {mode_label})")
         self.worker = threading.Thread(target=self._run_worker, args=(delay,), daemon=True)
         self.worker.start()
     def _run_queue_dialog(self) -> None:
@@ -459,12 +484,23 @@ class ModernEmailAppGUI:
             path,
             [
                 CampaignPreset(
-                    config=self.config_var.get(),
-                    recipients=self.recipients_var.get(),
-                    templates=self.templates_var.get(),
+                    config=self._portable_path_value(self.config_var.get()),
+                    recipients=self._portable_path_value(self.recipients_var.get()),
+                    templates=self._portable_path_value(self.templates_var.get()),
                     template=self.template_var.get() or None,
                     delay_seconds=float(self.delay_var.get().strip() or "0"),
                     dry_run=self.dry_run_var.get(),
+                    attachments_folder=self._portable_path_value(self.attachments_folder_var.get()) or None,
+                    use_proxy=self.proxy_enabled_var.get(),
+                    proxy_file=self._portable_path_value(self.proxy_file_var.get()) or None,
+                    rate_limit_per_minute=(int(self.rate_limit_var.get().strip()) if self.rate_limit_var.get().strip() else None),
+                    retry_attempts=(int(self.retry_attempts_var.get().strip()) if self.retry_attempts_var.get().strip() else None),
+                    retry_backoff_seconds=(float(self.retry_backoff_var.get().strip()) if self.retry_backoff_var.get().strip() else None),
+                    parallel_smtp_enabled=self.parallel_enabled_var.get(),
+                    parallel_smtp_accounts=(int(self.parallel_smtp_var.get().strip()) if self.parallel_smtp_var.get().strip() else None),
+                    batch_interval_seconds=(float(self.batch_interval_var.get().strip()) if self.batch_interval_var.get().strip() else None),
+                    reply_to=self.replyto_var.get().strip() or None,
+                    reply_to_mode=self.replyto_mode_var.get().strip() or None,
                 )
             ],
         )
@@ -510,6 +546,7 @@ class ModernEmailAppGUI:
                 template_override=self.template_var.get() or None,
                 random_attachments_folder_override=self.attachments_folder_var.get() or None,
                 use_proxy=self.proxy_enabled_var.get(),
+                proxy_file_override=self.proxy_file_var.get().strip() or None,
                 delay_override=delay,
                 rate_limit_per_minute=config.delivery.rate_limit_per_minute,
                 retry_attempts=config.delivery.retry_attempts,
@@ -517,6 +554,8 @@ class ModernEmailAppGUI:
                 parallel_smtp_enabled=self.parallel_enabled_var.get(),
                 parallel_smtp_accounts=config.delivery.parallel_smtp_accounts,
                 batch_interval_seconds=config.delivery.batch_interval_seconds,
+                reply_to_override=self.replyto_var.get().strip() or None,
+                reply_to_mode_override=self.replyto_mode_var.get().strip() or None,
                 progress_callback=lambda message: self.queue.put(("log", message)),
             )
             self.queue.put(("log", f"История CSV: {summary.history_csv}"))
@@ -668,7 +707,7 @@ class ModernEmailAppGUI:
                 base_dir=self.base_dir,
                 config_path=self.base_dir / self.config_var.get(),
                 recipients_path=self.base_dir / self.recipients_var.get(),
-                templates_path=self.templates_var.get(),
+                templates_path=self.base_dir / self.templates_var.get(),
                 template_override=self.template_var.get() or None,
                 recipient_email=self.preview_recipient_var.get() or None,
                 open_in_browser=True,
@@ -813,28 +852,22 @@ class ModernEmailAppGUI:
     def _open_visual_template_editor(self) -> None:
         try:
             template_path = self._current_template_path()
-            subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "email_app.desktop_rich_editor",
-                    "--template",
-                    str(template_path),
-                ],
-                cwd=str(self.base_dir),
-            )
+            editor_url = self.rich_editor_server.open_template(template_path)
         except CampaignError as error:
             messagebox.showerror("Email App Modern", str(error))
             return
+        except RichEditorError as error:
+            messagebox.showerror("Email App Modern", str(error))
+            return
         except Exception as error:  # noqa: BLE001
-            messagebox.showerror("Email App Modern", f"Не удалось открыть desktop-редактор: {error}")
+            messagebox.showerror("Email App Modern", f"Не удалось открыть визуальный редактор: {error}")
             return
 
-        self._append_log(f"Desktop-редактор открыт: {template_path}")
-        self.status_var.set("Desktop-редактор открыт")
+        self._append_log(f"Визуальный редактор открыт: {template_path} | {editor_url}")
+        self.status_var.set("Визуальный редактор открыт")
         messagebox.showinfo(
             "Email App Modern",
-            "Открыт desktop-редактор письма. После сохранения шаблон сразу обновится в проекте.",
+            "Открыт визуальный редактор в браузере. После сохранения шаблон сразу обновится в проекте.",
         )
 
     def _load_template_into_editor(self) -> None:
@@ -877,12 +910,23 @@ class ModernEmailAppGUI:
             return
 
         preset = CampaignPreset(
-            config=self.config_var.get(),
-            recipients=self.recipients_var.get(),
-            templates=self.templates_var.get(),
+            config=self._portable_path_value(self.config_var.get()),
+            recipients=self._portable_path_value(self.recipients_var.get()),
+            templates=self._portable_path_value(self.templates_var.get()),
             template=self.template_var.get() or None,
             delay_seconds=delay_seconds,
             dry_run=self.dry_run_var.get(),
+            attachments_folder=self._portable_path_value(self.attachments_folder_var.get()) or None,
+            use_proxy=self.proxy_enabled_var.get(),
+            proxy_file=self._portable_path_value(self.proxy_file_var.get()) or None,
+            rate_limit_per_minute=(int(self.rate_limit_var.get().strip()) if self.rate_limit_var.get().strip() else None),
+            retry_attempts=(int(self.retry_attempts_var.get().strip()) if self.retry_attempts_var.get().strip() else None),
+            retry_backoff_seconds=(float(self.retry_backoff_var.get().strip()) if self.retry_backoff_var.get().strip() else None),
+            parallel_smtp_enabled=self.parallel_enabled_var.get(),
+            parallel_smtp_accounts=(int(self.parallel_smtp_var.get().strip()) if self.parallel_smtp_var.get().strip() else None),
+            batch_interval_seconds=(float(self.batch_interval_var.get().strip()) if self.batch_interval_var.get().strip() else None),
+            reply_to=self.replyto_var.get().strip() or None,
+            reply_to_mode=self.replyto_mode_var.get().strip() or None,
         )
         saved_path = save_preset(path, preset)
         self.current_preset_path = saved_path
@@ -907,11 +951,23 @@ class ModernEmailAppGUI:
             return
 
         self.current_preset_path = path
-        self.config_var.set(preset.config)
-        self.recipients_var.set(preset.recipients)
-        self.templates_var.set(preset.templates)
+        self.config_var.set(self._portable_path_value(preset.config))
+        self.recipients_var.set(self._portable_path_value(preset.recipients))
+        self.templates_var.set(self._portable_path_value(preset.templates))
         self.delay_var.set("" if preset.delay_seconds is None else str(preset.delay_seconds))
         self.dry_run_var.set(preset.dry_run)
+        self.attachments_folder_var.set(self._portable_path_value(preset.attachments_folder or ""))
+        self.proxy_enabled_var.set(preset.use_proxy)
+        self.proxy_file_var.set(self._portable_path_value(preset.proxy_file or "config/proxies.txt"))
+        self.rate_limit_var.set("" if preset.rate_limit_per_minute is None else str(preset.rate_limit_per_minute))
+        self.retry_attempts_var.set("" if preset.retry_attempts is None else str(preset.retry_attempts))
+        self.retry_backoff_var.set("" if preset.retry_backoff_seconds is None else str(preset.retry_backoff_seconds))
+        self.parallel_enabled_var.set(bool(preset.parallel_smtp_enabled) if preset.parallel_smtp_enabled is not None else False)
+        self.parallel_smtp_var.set("" if preset.parallel_smtp_accounts is None else str(preset.parallel_smtp_accounts))
+        self.batch_interval_var.set("" if preset.batch_interval_seconds is None else str(preset.batch_interval_seconds))
+        self.replyto_var.set(preset.reply_to or "")
+        if preset.reply_to_mode in {"random", "fixed"}:
+            self.replyto_mode_var.set(preset.reply_to_mode)
         self._refresh_templates()
         if preset.template:
             self.template_var.set(preset.template)
@@ -954,9 +1010,24 @@ class ModernEmailAppGUI:
         except ValueError:
             return str(path)
 
-    def _on_theme_change(self) -> None:
-        """Handle theme change."""
-        theme = self.theme_var.get()
+    def _portable_path_value(self, value: str) -> str:
+        text = str(value).strip()
+        if not text:
+            return text
+        candidate = Path(text)
+        if not candidate.is_absolute():
+            return text
+        try:
+            return str(candidate.resolve().relative_to(self.base_dir.resolve()))
+        except ValueError:
+            return text
+
+    def _on_theme_change(self, selected_theme: str | None = None) -> None:
+        """Handle theme change from combo callback and apply safely."""
+        theme = (selected_theme or self.theme_var.get() or "dark").strip().lower()
+        if theme not in {"dark", "light", "system"}:
+            theme = "dark"
+        self.theme_var.set(theme)
         self.ctk.set_appearance_mode(theme)
 
     def _load_replyto_txt(self):

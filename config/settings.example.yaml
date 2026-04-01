@@ -46,7 +46,8 @@ smtp:
   # proxy_user: 111111
   # proxy_pass: 111111
   # --- Пул SMTP-аккаунтов (ротация) ---
-  # accounts_file: config/smtp_accounts.example.csv # CSV-файл с пулом SMTP
+  # accounts_file: config/smtp_accounts.example.txt # TXT-файл с пулом SMTP (рекомендуется)
+  # Также поддерживается CSV: config/smtp_accounts.example.csv
 
 message:
   subject: "Пример HTML-письма"    # Тема письма (можно использовать Jinja2-переменные)
@@ -81,6 +82,13 @@ delivery:
   retry_backoff_seconds: 5.0       # Задержка между попытками (сек)
 
 content:
+  # Рандом-текст: задайте список и используйте в шаблоне {{ переменная | random }}
+  # Пример:
+  # greeting:
+  #   - "Добро пожаловать!"
+  #   - "Рады видеть вас!"
+  #   - "Спасибо, что вы с нами!"
+  # В шаблоне: {{ greeting | random }}
   headline: "Добро пожаловать"     # Заголовок письма (можно использовать переменные)
   preheader: "Короткое описание письма" # Краткое описание (preview)
   body_intro: "Это пример безопасного SMTP-приложения на Python для легитимной рассылки opt-in писем."

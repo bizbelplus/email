@@ -27,6 +27,7 @@ from .stats import (
     load_history_records,
     summarize_history_records,
 )
+from .tinymce_editor import RichEditorError, RichTemplateEditorServer
 
 
 class EmailAppGUI:
@@ -54,6 +55,7 @@ class EmailAppGUI:
         self.preview_window: tk.Toplevel | None = None
         self.preview_source_text: tk.Text | None = None
         self.preview_html_widget = None
+        self.rich_editor_server = RichTemplateEditorServer(base_dir)
 
         self._build()
         if self.current_preset_path:
@@ -108,7 +110,7 @@ class EmailAppGUI:
             ("Предпросмотр", self._preview_email),
             ("Статистика", self._show_stats),
             ("Визуальный редактор", self._open_visual_template_editor),
-            ("Редактор шаблона", self._open_template_editor),
+            ("Редактор HTML", self._open_template_editor),
             ("Сохранить пресет", self._save_preset_dialog),
             ("Загрузить пресет", self._load_preset_dialog),
             ("Очистить лог", self._clear_log),
@@ -271,9 +273,9 @@ class EmailAppGUI:
             path,
             [
                 CampaignPreset(
-                    config=self.config_var.get(),
-                    recipients=self.recipients_var.get(),
-                    templates=self.templates_var.get(),
+                    config=self._portable_path_value(self.config_var.get()),
+                    recipients=self._portable_path_value(self.recipients_var.get()),
+                    templates=self._portable_path_value(self.templates_var.get()),
                     template=self.template_var.get() or None,
                     delay_seconds=float(self.delay_var.get().strip() or "0"),
                     dry_run=self.dry_run_var.get(),
@@ -291,17 +293,15 @@ class EmailAppGUI:
                 recipients_path=self.base_dir / self.recipients_var.get(),
                 templates_path=self.base_dir / self.templates_var.get(),
                 template_override=self.template_var.get() or None,
-                open_in_browser=False,
+                open_in_browser=True,
             )
-            html_content = summary.preview_path.read_text(encoding="utf-8")
             message = (
                 f"Предпросмотр сохранён: {summary.preview_path}\n"
                 f"Шаблон: {summary.template_name}\n"
                 f"Получатель: {summary.recipient_email}"
             )
-            self._show_preview_window(html_content=html_content, preview_path=summary.preview_path)
             self._append_log(message)
-            self.status_var.set("Предпросмотр открыт в GUI")
+            self.status_var.set("Предпросмотр открыт в браузере")
         except CampaignError as error:
             self._append_log(f"Ошибка предпросмотра: {error}")
             messagebox.showerror("Email App", str(error))
@@ -408,9 +408,9 @@ class EmailAppGUI:
             return
 
         preset = CampaignPreset(
-            config=self.config_var.get(),
-            recipients=self.recipients_var.get(),
-            templates=self.templates_var.get(),
+            config=self._portable_path_value(self.config_var.get()),
+            recipients=self._portable_path_value(self.recipients_var.get()),
+            templates=self._portable_path_value(self.templates_var.get()),
             template=self.template_var.get() or None,
             delay_seconds=float(self.delay_var.get().strip() or "0"),
             dry_run=self.dry_run_var.get(),
@@ -438,9 +438,9 @@ class EmailAppGUI:
             return
 
         self.current_preset_path = path
-        self.config_var.set(preset.config)
-        self.recipients_var.set(preset.recipients)
-        self.templates_var.set(preset.templates)
+        self.config_var.set(self._portable_path_value(preset.config))
+        self.recipients_var.set(self._portable_path_value(preset.recipients))
+        self.templates_var.set(self._portable_path_value(preset.templates))
         self.delay_var.set("" if preset.delay_seconds is None else str(preset.delay_seconds))
         self.dry_run_var.set(preset.dry_run)
         self._refresh_templates()
@@ -573,7 +573,10 @@ class EmailAppGUI:
             toolbar = ttk.Frame(self.editor_window, padding=8)
             toolbar.pack(fill=tk.X)
             ttk.Button(toolbar, text="Перезагрузить", command=self._load_template_into_editor).pack(side=tk.LEFT)
-            ttk.Button(toolbar, text="Сохранить", command=self._save_template_from_editor).pack(side=tk.LEFT, padx=(8, 0))
+            ttk.Button(toolbar, text="Сохранить", command=self._save_template_from_editor).pack(
+                side=tk.LEFT,
+                padx=(8, 0),
+            )
 
             self.editor_text = tk.Text(self.editor_window, wrap="none", undo=True)
             self.editor_text.pack(fill=tk.BOTH, expand=True)
@@ -582,34 +585,31 @@ class EmailAppGUI:
             scrollbar_y.pack(side=tk.RIGHT, fill=tk.Y)
             self.editor_text.configure(yscrollcommand=scrollbar_y.set)
 
+            scrollbar_x = ttk.Scrollbar(self.editor_window, orient="horizontal", command=self.editor_text.xview)
+            scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X)
+            self.editor_text.configure(xscrollcommand=scrollbar_x.set)
+
+            self.editor_window.bind("<Control-s>", lambda _event: self._save_template_from_editor())
+
         self._load_template_into_editor()
 
     def _open_visual_template_editor(self) -> None:
         try:
             template_path = self._current_template_path()
-            subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "email_app.desktop_rich_editor",
-                    "--template",
-                    str(template_path),
-                ],
-                cwd=str(self.base_dir),
-            )
+            editor_url = self.rich_editor_server.open_template(template_path)
         except CampaignError as error:
             messagebox.showerror("Email App", str(error))
             return
+        except RichEditorError as error:
+            messagebox.showerror("Email App", str(error))
+            return
         except Exception as error:  # noqa: BLE001
-            messagebox.showerror("Email App", f"Не удалось открыть desktop-редактор: {error}")
+            messagebox.showerror("Email App", f"Не удалось открыть визуальный редактор: {error}")
             return
 
-        self._append_log(f"Desktop-редактор открыт: {template_path}")
-        self.status_var.set("Desktop-редактор открыт")
-        messagebox.showinfo(
-            "Email App",
-            "Открыт desktop-редактор письма. После сохранения шаблон сразу обновится в проекте.",
-        )
+        self._append_log(f"Визуальный редактор открыт: {template_path} | {editor_url}")
+        self.status_var.set("Визуальный редактор открыт")
+        messagebox.showinfo("Email App", "Открыт визуальный редактор в браузере. После сохранения шаблон сразу обновится в проекте.")
 
     def _load_template_into_editor(self) -> None:
         if self.editor_text is None:
@@ -666,6 +666,18 @@ class EmailAppGUI:
             return str(path.relative_to(self.base_dir))
         except ValueError:
             return str(path)
+
+    def _portable_path_value(self, value: str) -> str:
+        text = str(value).strip()
+        if not text:
+            return text
+        candidate = Path(text)
+        if not candidate.is_absolute():
+            return text
+        try:
+            return str(candidate.resolve().relative_to(self.base_dir.resolve()))
+        except ValueError:
+            return text
 
 
 def launch_gui(base_dir: Path, preset_path: Path | None = None) -> None:

@@ -55,6 +55,17 @@ def _load_campaign_queue_json(queue_path: Path) -> list[CampaignPreset]:
                     else None
                 ),
                 dry_run=bool(item.get("dry_run", True)),
+                attachments_folder=(str(item["attachments_folder"]) if item.get("attachments_folder") else None),
+                use_proxy=bool(item.get("use_proxy", True)),
+                proxy_file=(str(item["proxy_file"]) if item.get("proxy_file") else None),
+                rate_limit_per_minute=(int(item["rate_limit_per_minute"]) if item.get("rate_limit_per_minute") not in (None, "") else None),
+                retry_attempts=(int(item["retry_attempts"]) if item.get("retry_attempts") not in (None, "") else None),
+                retry_backoff_seconds=(float(item["retry_backoff_seconds"]) if item.get("retry_backoff_seconds") not in (None, "") else None),
+                parallel_smtp_enabled=(bool(item.get("parallel_smtp_enabled")) if item.get("parallel_smtp_enabled") is not None else None),
+                parallel_smtp_accounts=(int(item["parallel_smtp_accounts"]) if item.get("parallel_smtp_accounts") not in (None, "") else None),
+                batch_interval_seconds=(float(item["batch_interval_seconds"]) if item.get("batch_interval_seconds") not in (None, "") else None),
+                reply_to=(str(item["reply_to"]) if item.get("reply_to") else None),
+                reply_to_mode=(str(item["reply_to_mode"]) if item.get("reply_to_mode") else None),
             )
         )
 
@@ -75,6 +86,17 @@ def _load_campaign_queue_csv(queue_path: Path) -> list[CampaignPreset]:
                 template=(str(row["template"]) if row.get("template") else None),
                 delay_seconds=(float(row["delay_seconds"]) if row.get("delay_seconds") else None),
                 dry_run=str(row.get("dry_run", "true")).strip().lower() in {"1", "true", "yes", "on"},
+                attachments_folder=(str(row["attachments_folder"]) if row.get("attachments_folder") else None),
+                use_proxy=str(row.get("use_proxy", "true")).strip().lower() in {"1", "true", "yes", "on"},
+                proxy_file=(str(row["proxy_file"]) if row.get("proxy_file") else None),
+                rate_limit_per_minute=(int(row["rate_limit_per_minute"]) if row.get("rate_limit_per_minute") else None),
+                retry_attempts=(int(row["retry_attempts"]) if row.get("retry_attempts") else None),
+                retry_backoff_seconds=(float(row["retry_backoff_seconds"]) if row.get("retry_backoff_seconds") else None),
+                parallel_smtp_enabled=(str(row["parallel_smtp_enabled"]).strip().lower() in {"1", "true", "yes", "on"} if row.get("parallel_smtp_enabled") else None),
+                parallel_smtp_accounts=(int(row["parallel_smtp_accounts"]) if row.get("parallel_smtp_accounts") else None),
+                batch_interval_seconds=(float(row["batch_interval_seconds"]) if row.get("batch_interval_seconds") else None),
+                reply_to=(str(row["reply_to"]) if row.get("reply_to") else None),
+                reply_to_mode=(str(row["reply_to_mode"]) if row.get("reply_to_mode") else None),
             )
             for row in reader
         ]
@@ -102,6 +124,17 @@ def _save_campaign_queue_json(queue_path: Path, campaigns: list[CampaignPreset])
             "template": campaign.template,
             "delay_seconds": campaign.delay_seconds,
             "dry_run": campaign.dry_run,
+            "attachments_folder": campaign.attachments_folder,
+            "use_proxy": campaign.use_proxy,
+            "proxy_file": campaign.proxy_file,
+            "rate_limit_per_minute": campaign.rate_limit_per_minute,
+            "retry_attempts": campaign.retry_attempts,
+            "retry_backoff_seconds": campaign.retry_backoff_seconds,
+            "parallel_smtp_enabled": campaign.parallel_smtp_enabled,
+            "parallel_smtp_accounts": campaign.parallel_smtp_accounts,
+            "batch_interval_seconds": campaign.batch_interval_seconds,
+            "reply_to": campaign.reply_to,
+            "reply_to_mode": campaign.reply_to_mode,
         }
         for campaign in campaigns
     ]
@@ -113,7 +146,25 @@ def _save_campaign_queue_csv(queue_path: Path, campaigns: list[CampaignPreset]) 
     with queue_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["config", "recipients", "templates", "template", "delay_seconds", "dry_run"],
+            fieldnames=[
+                "config",
+                "recipients",
+                "templates",
+                "template",
+                "delay_seconds",
+                "dry_run",
+                "attachments_folder",
+                "use_proxy",
+                "proxy_file",
+                "rate_limit_per_minute",
+                "retry_attempts",
+                "retry_backoff_seconds",
+                "parallel_smtp_enabled",
+                "parallel_smtp_accounts",
+                "batch_interval_seconds",
+                "reply_to",
+                "reply_to_mode",
+            ],
         )
         writer.writeheader()
         for campaign in campaigns:
@@ -125,6 +176,17 @@ def _save_campaign_queue_csv(queue_path: Path, campaigns: list[CampaignPreset]) 
                     "template": campaign.template or "",
                     "delay_seconds": campaign.delay_seconds if campaign.delay_seconds is not None else "",
                     "dry_run": str(campaign.dry_run).lower(),
+                    "attachments_folder": campaign.attachments_folder or "",
+                    "use_proxy": str(campaign.use_proxy).lower(),
+                    "proxy_file": campaign.proxy_file or "",
+                    "rate_limit_per_minute": campaign.rate_limit_per_minute if campaign.rate_limit_per_minute is not None else "",
+                    "retry_attempts": campaign.retry_attempts if campaign.retry_attempts is not None else "",
+                    "retry_backoff_seconds": campaign.retry_backoff_seconds if campaign.retry_backoff_seconds is not None else "",
+                    "parallel_smtp_enabled": "" if campaign.parallel_smtp_enabled is None else str(campaign.parallel_smtp_enabled).lower(),
+                    "parallel_smtp_accounts": campaign.parallel_smtp_accounts if campaign.parallel_smtp_accounts is not None else "",
+                    "batch_interval_seconds": campaign.batch_interval_seconds if campaign.batch_interval_seconds is not None else "",
+                    "reply_to": campaign.reply_to or "",
+                    "reply_to_mode": campaign.reply_to_mode or "",
                 }
             )
     return queue_path
@@ -157,7 +219,18 @@ def run_campaign_queue(
             templates_path=base_dir / campaign.templates,
             dry_run=campaign.dry_run,
             template_override=campaign.template,
+            random_attachments_folder_override=campaign.attachments_folder,
+            use_proxy=campaign.use_proxy,
+            proxy_file_override=campaign.proxy_file,
             delay_override=campaign.delay_seconds,
+            rate_limit_per_minute=campaign.rate_limit_per_minute,
+            retry_attempts=campaign.retry_attempts,
+            retry_backoff_seconds=campaign.retry_backoff_seconds,
+            parallel_smtp_enabled=campaign.parallel_smtp_enabled,
+            parallel_smtp_accounts=campaign.parallel_smtp_accounts,
+            batch_interval_seconds=campaign.batch_interval_seconds,
+            reply_to_override=campaign.reply_to,
+            reply_to_mode_override=campaign.reply_to_mode,
             progress_callback=progress_callback,
         )
         completed += 1

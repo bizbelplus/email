@@ -37,6 +37,9 @@ pyinstaller ^
   --add-data "config;config" ^
   --add-data "files;files" ^
   --add-data "presets;presets" ^
+  --add-data "preview;preview" ^
+  --add-data "history;history" ^
+  --add-data "logs;logs" ^
   --add-data "recipients.csv;." ^
   --collect-all customtkinter ^
   --collect-all tkhtmlview ^
@@ -59,6 +62,21 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
+
+  REM Гарантируем структуру portable-папки даже если каталоги пустые
+  set "DIST_DIR=dist\Email App"
+  if not exist "%DIST_DIR%\config" mkdir "%DIST_DIR%\config"
+  if not exist "%DIST_DIR%\templates" mkdir "%DIST_DIR%\templates"
+  if not exist "%DIST_DIR%\files" mkdir "%DIST_DIR%\files"
+  if not exist "%DIST_DIR%\presets" mkdir "%DIST_DIR%\presets"
+  if not exist "%DIST_DIR%\preview" mkdir "%DIST_DIR%\preview"
+  if not exist "%DIST_DIR%\history" mkdir "%DIST_DIR%\history"
+  if not exist "%DIST_DIR%\logs" mkdir "%DIST_DIR%\logs"
+
+  REM Подкладываем базовые файлы, если их не затянуло автоматически
+  if exist "config\settings.example.yaml" if not exist "%DIST_DIR%\config\settings.example.yaml" copy "config\settings.example.yaml" "%DIST_DIR%\config\settings.example.yaml" >nul
+  if exist "config\settings.yaml" if not exist "%DIST_DIR%\config\settings.yaml" copy "config\settings.yaml" "%DIST_DIR%\config\settings.yaml" >nul
+  if exist "recipients.csv" if not exist "%DIST_DIR%\recipients.csv" copy "recipients.csv" "%DIST_DIR%\recipients.csv" >nul
 
 echo.
 echo ============================================================

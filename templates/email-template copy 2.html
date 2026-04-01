@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="ru">
+<head>
+
+
+
+
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ subject }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #eef2ff;
+        --shell: #f8fafc;
+        --card: #ffffff;
+        --card-soft: #f8fbff;
+        --line: rgba(15, 23, 42, 0.08);
+        --text: #0f172a;
+        --muted: #64748b;
+        --primary: #2563eb;
+        --primary-dark: #1d4ed8;
+        --accent: #7c3aed;
+        --accent-soft: rgba(124, 58, 237, 0.12);
+        --success-soft: rgba(37, 99, 235, 0.10);
+        --shadow: 0 24px 60px rgba(37, 99, 235, 0.12);
+        --radius-xl: 28px;
+        --radius-lg: 20px;
+        --radius-md: 14px;
+      }
+
+      body {
+        margin: 0;
+        padding: 0;
+        background:
+          radial-gradient(circle at top left, rgba(124, 58, 237, 0.14), transparent 32%),
+          radial-gradient(circle at top right, rgba(37, 99, 235, 0.14), transparent 28%),
+          linear-gradient(180deg, #f5f7ff 0%, #eef2ff 100%);
+        font-family: Inter, Arial, sans-serif;
+        color: var(--text);
+      }
+
+      table {
+        border-collapse: collapse;
+      }
+
+      .wrapper {
+        width: 100%;
+        background: transparent;
+        padding: 28px 14px;
+      }
+
+      .container {
+        width: 100%;
+        max-width: 680px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-xl);
+        overflow: hidden;
+        box-shadow: var(--shadow);
+      }
+
+      .hero {
+        padding: 40px 40px 28px;
+        background:
+          radial-gradient(circle at 85% 15%, rgba(255,255,255,0.24), transparent 20%),
+          linear-gradient(135deg, #1d4ed8 0%, #2563eb 48%, #7c3aed 100%);
+        color: #ffffff;
+      }
+
+      .brand-badge {
+        display: inline-block;
+        padding: 8px 14px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.16);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        font-size: 12px;
+        line-height: 1;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        font-weight: 700;
+        margin-bottom: 18px;
+      }
+
+      .hero-image {
+        margin: 0 0 18px;
+      }
+
+      .hero-image img {
+        display: block;
+        max-width: 168px;
+        height: auto;
+        border: 0;
+      }
+
+      .title {
+        margin: 0 0 10px;
+        font-family: Manrope, Inter, Arial, sans-serif;
+        font-size: 32px;
+        line-height: 1.18;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+      }
+
+      .subtitle {
+        margin: 0;
+        max-width: 520px;
+        font-size: 16px;
+        line-height: 1.7;
+        color: rgba(255, 255, 255, 0.92);
+      }
+
+      .content {
+        padding: 38px 40px 18px;
+      }
+
+      .greeting,
+      .paragraph,
+      .note,
+      .signature {
+        margin: 0 0 18px;
+        font-size: 16px;
+        line-height: 1.75;
+      }
+
+      .greeting {
+        font-weight: 600;
+      }
+
+      .highlight-box {
+        margin: 0 0 24px;
+        padding: 18px 20px;
+        border-radius: var(--radius-lg);
+        background: linear-gradient(180deg, var(--card-soft) 0%, #ffffff 100%);
+        border: 1px solid rgba(37, 99, 235, 0.10);
+      }
+
+      .highlight-label {
+        margin: 0 0 6px;
+        font-size: 12px;
+        line-height: 1.4;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--primary);
+        font-weight: 800;
+      }
+
+      .highlight-text {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.7;
+        color: var(--text);
+      }
+
+      .cta-wrap {
+        padding: 8px 0 6px;
+      }
+
+      .button {
+        display: inline-block;
+        padding: 15px 24px;
+        border-radius: 14px;
+        background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+        color: #ffffff !important;
+        text-decoration: none;
+        font-size: 15px;
+        line-height: 1;
+        font-weight: 800;
+        letter-spacing: 0.01em;
+        box-shadow: 0 14px 30px rgba(37, 99, 235, 0.22);
+      }
+
+      .meta {
+        margin-top: 28px;
+        padding-top: 20px;
+        border-top: 1px solid var(--line);
+      }
+
+      .meta-card {
+        margin: 0 0 22px;
+        padding: 16px 18px;
+        border-radius: 16px;
+        background: #f8fafc;
+        border: 1px solid rgba(15, 23, 42, 0.06);
+      }
+
+      .meta-title {
+        margin: 0 0 6px;
+        font-size: 13px;
+        line-height: 1.5;
+        font-weight: 700;
+        color: var(--text);
+      }
+
+      .meta-text {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.7;
+        color: var(--muted);
+      }
+
+      .footer {
+        padding: 0 40px 34px;
+      }
+
+      .footer-inner {
+        padding: 18px 20px;
+        border-radius: 18px;
+        background: #f8fafc;
+        border: 1px solid rgba(15, 23, 42, 0.06);
+      }
+
+      .footer-text {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.7;
+        color: var(--muted);
+      }
+
+      .divider-space {
+        height: 8px;
+        line-height: 8px;
+        font-size: 8px;
+      }
+
+      @media only screen and (max-width: 720px) {
+        .wrapper {
+          padding: 16px 10px;
+        }
+
+        .hero,
+        .content,
+        .footer {
+          padding-left: 24px !important;
+          padding-right: 24px !important;
+        }
+
+        .hero {
+          padding-top: 30px !important;
+          padding-bottom: 24px !important;
+        }
+
+        .content {
+          padding-top: 28px !important;
+        }
+
+        .title {
+          font-size: 26px !important;
+        }
+
+        .button {
+          display: block !important;
+          text-align: center !important;
+        }
+      }
+
+      @media only screen and (max-width: 480px) {
+        .hero,
+        .content,
+        .footer {
+          padding-left: 18px !important;
+          padding-right: 18px !important;
+        }
+
+        .title {
+          font-size: 22px !important;
+        }
+
+        .greeting,
+        .paragraph,
+        .note,
+        .signature,
+        .subtitle {
+          font-size: 15px !important;
+        }
+      }
+    </style>
+  
+
+
+
+</head>
+<body>
+<br><table role="presentation" width="100%" cellspacing="0" cellpadding="0" class="wrapper">
+      <tbody><tr>
+        <td align="center">
+          <table role="presentation" width="680" cellspacing="0" cellpadding="0" class="container">
+            <tbody><tr>
+              <td class="hero">
+                <div class="brand-badge"><b>Ваш бренд</b></div>
+                {% if inline_images.hero %}
+                <p class="hero-image">
+                  <img src="cid:{{ inline_images.hero.cid }}" alt="Hero" style="display:block;max-width:168px;height:auto;border:0;">
+                </p>
+                {% endif %}
+                <h1 class="title">{{ приветствие }}</h1>
+                <p class="subtitle">{{ кратко }}😑</p>
+              </td>
+            </tr>
+            <tr>
+              <td class="content">
+                <p class="greeting">Здравствуйте{% if recipient.имя %}, {{ recipient.имя }}{% endif %}!</p>
+                <p class="paragraph">{{ вступление }}</p>
+
+                <div class="highlight-box">
+                  <p class="highlight-label">Коротко</p>
+                  <p class="highlight-text">{{ текст }}</p>
+                </div>
+
+                {% if ссылка_кнопки and кнопка %}
+                <div class="cta-wrap">
+                  <a href="{{ ссылка_кнопки }}" class="button">{{ кнопка }}</a>
+                </div>
+                {% endif %}
+
+                <div class="meta">
+                  <div class="meta-card">
+                    <p class="meta-title"><b>Почему это письмо легко читать</b></p>
+                    <p class="meta-text"><font color="#0a96db">Чистая структура</font>, крупный заголовок, мягкие отступы и аккуратный акцент на основном действии.</p>
+                  </div>
+                </div>
+
+                <p class="signature"><b>С уважением</b>,<br>{{ sender_name | default('Команда поддержки') }}</p>
+              </td>
+            </tr>
+          </tbody></table>
+        </td>
+      </tr>
+    </tbody></table>
+  
+
+
+
+
+
+
+
+
+</body>
+</html>
