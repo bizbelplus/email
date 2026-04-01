@@ -237,7 +237,6 @@ class ModernEmailAppGUI:
         ).pack(side="left", padx=(8, 0))
         self._subjects_count_label = self.ctk.CTkLabel(domains_btn_frame, text="")
         self._subjects_count_label.pack(side="left", padx=(16, 0))
-        self._update_text_mode_ui()
 
         # === ШАБЛОН И ОПЦИИ (Раздел 2) ===
         template_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
@@ -2859,13 +2858,6 @@ class ModernEmailAppGUI:
             subjects_path = self.base_dir / subjects
             if subjects_path.exists():
                 self._load_subjects_file(subjects_path)
-
-        texts = data.get("texts_file", "")
-        if texts:
-            texts_path = self.base_dir / texts
-            if texts_path.exists():
-                self._load_texts_file(texts_path)
-        self._update_text_mode_ui()
 
     def _on_close(self) -> None:
         self._save_last_session()
