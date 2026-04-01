@@ -625,7 +625,7 @@ def run_campaign(
     logger, log_path = _create_logger(base_dir, config.delivery.log_file)
     history_csv_path = _resolve_output_path(base_dir, config.delivery.history_csv)
     history_jsonl_path = _resolve_output_path(base_dir, config.delivery.history_jsonl)
-    mailers = [SMTPMailer(settings) for settings in config.smtp_accounts]
+    runtime_smtp_accounts = list(config.smtp_accounts)
     # --- Загрузка списка прокси ---
     proxy_file = (base_dir / (proxy_file_override or "config/proxies.txt"))
     proxies = load_proxies(proxy_file) if proxy_file.exists() else []
@@ -662,6 +662,22 @@ def run_campaign(
         if progress_callback is not None:
             progress_callback(message)
 
+    def _reload_smtp_accounts_runtime() -> None:
+        nonlocal runtime_smtp_accounts
+        try:
+            refreshed = load_config(config_path)
+        except Exception as error:  # noqa: BLE001
+            emit(f"⚠️ Не удалось перечитать SMTP-аккаунты: {error}")
+            return
+
+        new_accounts = list(getattr(refreshed, "smtp_accounts", []) or [])
+        if not new_accounts:
+            emit("⚠️ SMTP-аккаунты не обновлены: список пуст, продолжаем со старыми")
+            return
+
+        runtime_smtp_accounts = new_accounts
+        emit(f"🔄 SMTP-аккаунты обновлены: {len(runtime_smtp_accounts)}")
+
     def _wait_if_paused_or_stopped() -> bool:
         announced = False
         while pause_event is not None and pause_event.is_set():
@@ -672,6 +688,7 @@ def run_campaign(
                 announced = True
             time.sleep(0.2)
         if announced:
+            _reload_smtp_accounts_runtime()
             emit("▶ Рассылка продолжена")
         return not (stop_event is not None and stop_event.is_set())
 
@@ -832,7 +849,7 @@ def run_campaign(
         template_name,
         len(attachment_paths),
         len(inline_image_paths),
-        len(mailers),
+        len(runtime_smtp_accounts),
         config.delivery.skip_previously_sent,
         reply_to_mode,
         len(reply_to_candidates),
@@ -871,9 +888,9 @@ def run_campaign(
 
     # Параллельная отправка должна включаться только явным флагом.
     # Иначе пользователь видит параллельный режим даже при выключенном чекбоксе.
-    use_parallel = bool(config.delivery.parallel_smtp_enabled) and (len(mailers) > 1)
+    use_parallel = bool(config.delivery.parallel_smtp_enabled) and (len(runtime_smtp_accounts) > 1)
     if use_parallel:
-        batch_size = min(config.delivery.parallel_smtp_accounts, len(mailers)) if len(mailers) > 0 else 1
+        batch_size = min(config.delivery.parallel_smtp_accounts, len(runtime_smtp_accounts)) if len(runtime_smtp_accounts) > 0 else 1
         batch_interval = max(0.0, config.delivery.batch_interval_seconds)
 
         for batch_start in range(0, len(target_recipients), batch_size):
@@ -884,7 +901,10 @@ def run_campaign(
             futures = {}
             with ThreadPoolExecutor(max_workers=batch_size) as executor:
                 for offset, (index, recipient) in enumerate(batch):
-                    mailer_settings = deepcopy(config.smtp_accounts[(batch_start + offset) % len(config.smtp_accounts)])
+                    if not runtime_smtp_accounts:
+                        emit("⏹ Нет SMTP-аккаунтов для продолжения рассылки")
+                        break
+                    mailer_settings = deepcopy(runtime_smtp_accounts[(batch_start + offset) % len(runtime_smtp_accounts)])
                     futures[executor.submit(_send_task, index, recipient, mailer_settings, proxies, reply_to_candidates)] = (index, recipient)
 
                 for future in as_completed(futures):
@@ -921,7 +941,10 @@ def run_campaign(
             if not _wait_if_paused_or_stopped():
                 emit("⏹ Рассылка остановлена пользователем")
                 break
-            mailer_settings = deepcopy(config.smtp_accounts[(index - 1) % len(config.smtp_accounts)])
+            if not runtime_smtp_accounts:
+                emit("⏹ Нет SMTP-аккаунтов для продолжения рассылки")
+                break
+            mailer_settings = deepcopy(runtime_smtp_accounts[(index - 1) % len(runtime_smtp_accounts)])
             result = _send_task(index, recipient, mailer_settings, proxies, reply_to_candidates)
             successful += result["success_delta"]
             failed += result["fail_delta"]
