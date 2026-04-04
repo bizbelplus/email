@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 
 from .models import AppConfig, DeliverySettings, MessageSettings, SMTPSettings
+from .smtp_domains import get_smtp_defaults_for_email
 
 
 class ConfigError(ValueError):
@@ -68,7 +69,14 @@ def _load_smtp_accounts_csv(accounts_file: Path) -> list[SMTPSettings]:
     return accounts
 
 
-def _load_smtp_accounts_txt(accounts_file: Path) -> list[SMTPSettings]:
+def _load_smtp_accounts_txt(
+    accounts_file: Path,
+    defaults: dict[str, Any] | None = None,
+    domains_db: dict[str, dict[str, Any]] | None = None,
+    base_dir: Path | None = None,
+) -> list[SMTPSettings]:
+    defaults = defaults or {}
+    domains_db = domains_db or {}
     accounts: list[SMTPSettings] = []
     with accounts_file.open("r", encoding="utf-8-sig") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
@@ -76,24 +84,84 @@ def _load_smtp_accounts_txt(accounts_file: Path) -> list[SMTPSettings]:
             if not line or line.startswith("#"):
                 continue
 
-            parts = [item.strip() for item in line.split("|")]
-            if len(parts) < 6:
+            if "|" in line:
+                parts = [item.strip() for item in line.split("|")]
+                if len(parts) < 6:
+                    raise ConfigError(
+                        "TXT-файл SMTP-аккаунтов должен содержать минимум 6 полей через '|': "
+                        "host|port|username|password|from_email|from_name"
+                        f" (строка {line_number})"
+                    )
+
+                mapping: dict[str, Any] = {
+                    "host": parts[0],
+                    "port": parts[1],
+                    "username": parts[2],
+                    "password": parts[3],
+                    "from_email": parts[4],
+                    "from_name": parts[5],
+                    "use_tls": _parse_bool(parts[6], True) if len(parts) > 6 else True,
+                    "use_ssl": _parse_bool(parts[7], False) if len(parts) > 7 else False,
+                    "timeout_seconds": int(parts[8]) if len(parts) > 8 and parts[8] else int(defaults.get("timeout_seconds", 30) or 30),
+                }
+                accounts.append(_build_smtp_settings(mapping))
+                continue
+
+            if ":" not in line:
                 raise ConfigError(
-                    "TXT-файл SMTP-аккаунтов должен содержать минимум 6 полей через '|': "
-                    "host|port|username|password|from_email|from_name"
+                    "TXT-файл SMTP-аккаунтов должен содержать либо формат "
+                    "host|port|username|password|from_email|from_name, либо username:password"
                     f" (строка {line_number})"
                 )
 
-            mapping: dict[str, Any] = {
-                "host": parts[0],
-                "port": parts[1],
-                "username": parts[2],
-                "password": parts[3],
-                "from_email": parts[4],
-                "from_name": parts[5],
-                "use_tls": _parse_bool(parts[6], True) if len(parts) > 6 else True,
-                "use_ssl": _parse_bool(parts[7], False) if len(parts) > 7 else False,
-                "timeout_seconds": int(parts[8]) if len(parts) > 8 and parts[8] else 30,
+            username, password = [item.strip() for item in line.split(":", 1)]
+            if not username or not password:
+                raise ConfigError(f"Пустой username/password в SMTP TXT-файле (строка {line_number})")
+
+            guessed = get_smtp_defaults_for_email(username, domains=domains_db)
+            default_host_raw = str(defaults.get("host") or "").strip()
+            default_host_low = default_host_raw.lower()
+            # Не считаем шаблонный host из example-конфига реальным значением.
+            use_default_host = bool(default_host_raw) and default_host_low not in {
+                "smtp.example.com",
+                "example.com",
+            }
+            host = default_host_raw if use_default_host else str(guessed.get("host") or "").strip()
+            port = defaults.get("port") or guessed.get("port")
+            use_tls = defaults.get("use_tls")
+            if use_tls is None:
+                use_tls = guessed.get("use_tls", True)
+            use_ssl = defaults.get("use_ssl")
+            if use_ssl is None:
+                use_ssl = guessed.get("use_ssl", False)
+
+            # Для формата login:password защищаемся от конфликта,
+            # когда оба флага приходят True из defaults.
+            if bool(use_tls) and bool(use_ssl):
+                guessed_tls = bool(guessed.get("use_tls", False))
+                guessed_ssl = bool(guessed.get("use_ssl", False))
+                if guessed_tls != guessed_ssl:
+                    use_tls = guessed_tls
+                    use_ssl = guessed_ssl
+                elif str(port) == "465":
+                    use_tls = False
+                    use_ssl = True
+                else:
+                    use_tls = True
+                    use_ssl = False
+
+            from_name = str(defaults.get("from_name") or Path(username).stem or username)
+
+            mapping = {
+                "host": host,
+                "port": int(port) if port not in (None, "") else "",
+                "username": username,
+                "password": password,
+                "from_email": username,
+                "from_name": from_name,
+                "use_tls": use_tls,
+                "use_ssl": use_ssl,
+                "timeout_seconds": int(defaults.get("timeout_seconds", 30) or 30),
             }
             accounts.append(_build_smtp_settings(mapping))
     return accounts
@@ -130,7 +198,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         smtp_accounts = [_build_smtp_settings(smtp_raw)]
 
     message = MessageSettings(
-        subject=str(_require(message_raw, "subject")),
+        subject=str(message_raw.get("subject", "")),
         template=str(message_raw.get("template")) if message_raw.get("template") else None,
         reply_to=(str(message_raw["reply_to"]) if message_raw.get("reply_to") else None),
         attachments=[str(item) for item in message_raw.get("attachments", [])],

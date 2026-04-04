@@ -1,0 +1,2 @@
+﻿Привет!
+Тест TXT preview для {{ recipient.email }}

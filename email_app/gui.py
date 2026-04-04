@@ -73,7 +73,7 @@ class EmailAppGUI:
         self._add_path_row(container, 1, "Получатели", self.recipients_var, self._select_recipients)
         self._add_path_row(container, 2, "Шаблоны", self.templates_var, self._select_templates)
 
-        ttk.Label(container, text="HTML-шаблон").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(container, text="Шаблон (HTML/TXT)").grid(row=3, column=0, sticky="w", pady=(8, 0))
         template_row = ttk.Frame(container)
         template_row.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(8, 0))
         template_row.columnconfigure(0, weight=1)
@@ -105,7 +105,6 @@ class EmailAppGUI:
 
         button_specs = [
             ("Старт", self._start_send),
-            ("Очередь JSON", self._run_queue_dialog),
             ("Экспорт JSON/CSV", self._export_queue_dialog),
             ("Предпросмотр", self._preview_email),
             ("Статистика", self._show_stats),
@@ -165,7 +164,7 @@ class EmailAppGUI:
     def _select_recipients(self) -> None:
         path = filedialog.askopenfilename(
             initialdir=self.base_dir,
-            filetypes=[("CSV", "*.csv"), ("Все файлы", "*.*")],
+            filetypes=[("CSV/TXT", "*.csv *.txt"), ("CSV", "*.csv"), ("TXT", "*.txt"), ("Все файлы", "*.*")],
         )
         if path:
             self.recipients_var.set(self._relative(Path(path)))
@@ -295,6 +294,8 @@ class EmailAppGUI:
                 template_override=self.template_var.get() or None,
                 open_in_browser=True,
             )
+            preview_html = summary.preview_path.read_text(encoding="utf-8")
+            self._show_preview_window(preview_html, summary.preview_path)
             message = (
                 f"Предпросмотр сохранён: {summary.preview_path}\n"
                 f"Шаблон: {summary.template_name}\n"

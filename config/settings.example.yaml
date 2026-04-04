@@ -47,17 +47,16 @@ smtp:
   # proxy_pass: 111111
   # --- Пул SMTP-аккаунтов (ротация) ---
   # accounts_file: config/smtp_accounts.example.txt # TXT-файл с пулом SMTP (рекомендуется)
+  # accounts_file: config/smtp_accounts_login_password.example.txt # TXT-файл в формате login:password
   # Также поддерживается CSV: config/smtp_accounts.example.csv
 
 message:
   subject: "Пример HTML-письма"    # Тема письма (можно использовать Jinja2-переменные)
+  # Для набора тем по одной на строку используйте файл config/subjects.example.txt через GUI
   template: newsletter.html        # HTML-шаблон (Jinja2)
   reply_to: support@example.com    # Email для ответа (Reply-To)
-  attachments:                     # Список файлов-вложений
-    - files/example.txt
+  attachments: []                  # Список файлов-вложений
   random_attachments_folder: "" # Папка для случайных вложений (картинок), например files/random-images
-  attachments:                     # Список файлов-вложений
-    - files/example.txt
   inline_images:                   # Inline-изображения (cid:)
     hero: files/example-inline.svg
 

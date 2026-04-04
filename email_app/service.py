@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import html
 import json
 import logging
 import random
@@ -9,6 +10,7 @@ import re
 import time
 import threading
 import webbrowser
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass
@@ -21,7 +23,7 @@ from urllib.parse import urlparse
 from .config import ConfigError, load_config
 from .models import MessageSettings, Recipient
 from .recipients import RecipientsError, load_recipients
-from .renderer import TemplateRenderer
+from .renderer import TemplateRenderError, TemplateRenderer
 from .smtp_client import SMTPMailer
 from .validators import validate_csv_recipients
 from .proxy_utils import load_proxies, pick_random_proxy
@@ -37,6 +39,12 @@ def _humanize_error_ru(error: Exception | str) -> str:
         return "Превышено время ожидания соединения"
     if "authentication" in low or "535" in low or "username and password not accepted" in low:
         return "Ошибка авторизации SMTP (логин/пароль или app-password неверные)"
+    if "daily user sending quota exceeded" in low or "daily sending quota" in low or "454 4.7.0" in low:
+        return "Достигнут суточный лимит отправки для SMTP-аккаунта"
+    if "too many recipients" in low or "421 4.7.0" in low:
+        return "Сработало ограничение провайдера (слишком много отправок/получателей)"
+    if "account disabled" in low or "account blocked" in low or "temporarily locked" in low:
+        return "SMTP-аккаунт заблокирован или временно ограничен провайдером"
     if "connection refused" in low:
         return "Соединение отклонено сервером"
     if "name or service not known" in low or "nodename nor servname provided" in low:
@@ -70,6 +78,7 @@ def _send_with_retry(
     html_body,
     attachment_paths,
     inline_image_paths,
+    body_subtype="html",
     retry_attempts: int = 1,
     retry_backoff_seconds: float = 5.0,
     before_attempt: Callable[[int], None] | None = None,
@@ -84,6 +93,7 @@ def _send_with_retry(
                 recipient=recipient,
                 message_settings=message_settings,
                 html_body=html_body,
+                body_subtype=body_subtype,
                 attachment_paths=attachment_paths,
                 inline_image_paths=inline_image_paths,
             )
@@ -164,6 +174,23 @@ def _validate_rendered_template(html_body: str) -> tuple[list[str], list[str]]:
     return warnings, errors
 
 
+def _template_body_subtype(template_name: str | None) -> str:
+    suffix = Path(template_name or "").suffix.lower()
+    if suffix == ".txt":
+        return "plain"
+    return "html"
+
+
+def _plain_text_to_preview_html(text_body: str) -> str:
+    escaped = html.escape(text_body)
+    return (
+        "<html><head><meta charset=\"utf-8\"></head><body>"
+        "<pre style=\"white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace;\">"
+        f"{escaped}"
+        "</pre></body></html>"
+    )
+
+
 def run_preflight(
     *,
     base_dir: Path,
@@ -176,18 +203,34 @@ def run_preflight(
     checks: list[str] = []
     warnings: list[str] = []
     errors: list[str] = []
+    logger = None
+
+    def _log_and_return() -> PreflightReport:
+        if logger is not None:
+            logger.info("Preflight: config=%s recipients=%s templates=%s", config_path, recipients_path, templates_path)
+            for item in checks:
+                logger.info("PRECHECK OK: %s", item)
+            for item in warnings:
+                logger.warning("PRECHECK WARN: %s", item)
+            for item in errors:
+                logger.error("PRECHECK ERROR: %s", item)
+        return PreflightReport(checks=checks, warnings=warnings, errors=errors)
 
     try:
         config = load_config(config_path)
+        logger, _ = _create_logger(base_dir, config.delivery.log_file)
         checks.append(f"Конфиг загружен: {config_path}")
     except ConfigError as error:
+        fallback_logger, _ = _create_logger(base_dir, "logs/email_app.log")
+        fallback_logger.error("PRECHECK ERROR: %s", error)
         return PreflightReport(checks=checks, warnings=warnings, errors=[str(error)])
 
     try:
         recipients = load_recipients(recipients_path)
         checks.append(f"Получатели загружены: {len(recipients)}")
     except RecipientsError as error:
-        return PreflightReport(checks=checks, warnings=warnings, errors=[str(error)])
+        errors.append(str(error))
+        return _log_and_return()
 
     # Email validation
     email_validation = validate_csv_recipients(str(recipients_path))
@@ -206,16 +249,19 @@ def run_preflight(
     available_templates = renderer.list_templates()
     if template_name not in available_templates:
         errors.append(f"Шаблон не найден: {template_name}")
-        return PreflightReport(checks=checks, warnings=warnings, errors=errors)
+        return _log_and_return()
     checks.append(f"Шаблон найден: {template_name}")
+    template_subtype = _template_body_subtype(template_name)
 
     try:
         attachment_paths = _resolve_attachment_paths(base_dir, config.message.attachments)
-        inline_image_paths = _resolve_inline_image_paths(base_dir, config.message.inline_images)
+        inline_image_paths: dict[str, Path] = {}
+        if template_subtype == "html":
+            inline_image_paths = _resolve_inline_image_paths(base_dir, config.message.inline_images)
         _ = _collect_random_attachment_files(base_dir, config.message.random_attachments_folder)
     except CampaignError as error:
         errors.append(str(error))
-        return PreflightReport(checks=checks, warnings=warnings, errors=errors)
+        return _log_and_return()
 
     random_attachments = []
     if config.message.random_attachments_folder:
@@ -224,7 +270,7 @@ def run_preflight(
             checks.append(f"Случайных вложений в папке: {len(random_attachments)} ({config.message.random_attachments_folder})")
         except CampaignError as error:
             errors.append(str(error))
-            return PreflightReport(checks=checks, warnings=warnings, errors=errors)
+            return _log_and_return()
 
     checks.append(f"Вложений: {len(attachment_paths)}")
     checks.append(f"Inline-изображений: {len(inline_image_paths)}")
@@ -235,11 +281,10 @@ def run_preflight(
     if body_text_override is not None:
         preflight_content["body_text"] = body_text_override
         preflight_content["message_text"] = body_text_override
-
-    rendered = renderer.render(
-        template_name=template_name,
-        recipient=first_recipient,
-        context={
+    preflight_context = _prepare_template_context(
+        renderer,
+        template_name,
+        {
             **preflight_content,
             "subject": config.message.subject,
             "inline_images": _build_inline_context(inline_image_paths),
@@ -254,13 +299,36 @@ def run_preflight(
             },
         },
     )
+    missing_vars = _find_missing_template_variables(renderer, template_name, preflight_context)
+    if missing_vars:
+        shown = ", ".join(missing_vars[:8])
+        if len(missing_vars) > 8:
+            shown += f" и ещё {len(missing_vars) - 8}"
+        warnings.append(
+            "В шаблоне используются переменные без значений: "
+            f"{shown}. Добавьте переменные в config/content или CSV."
+        )
+
+    try:
+        rendered = renderer.render(
+            template_name=template_name,
+            recipient=first_recipient,
+            context=preflight_context,
+        )
+    except TemplateRenderError as error:
+        errors.append(f"Ошибка рендера шаблона: {error}")
+        return _log_and_return()
     checks.append(f"Рендер тестового письма: {first_recipient.email}")
 
     template_warnings, template_errors = _validate_rendered_template(rendered)
+    if template_subtype == "plain":
+        template_warnings = [item for item in template_warnings if "<html>/<body>" not in item]
+        if config.message.inline_images:
+            warnings.append("Inline-изображения игнорируются для TXT-шаблона")
     warnings.extend(template_warnings)
     errors.extend(template_errors)
 
-    return PreflightReport(checks=checks, warnings=warnings, errors=errors)
+    return _log_and_return()
 
 
 def _create_logger(base_dir: Path, log_file: str) -> tuple[logging.Logger, Path]:
@@ -273,7 +341,7 @@ def _create_logger(base_dir: Path, log_file: str) -> tuple[logging.Logger, Path]
     logger.propagate = False
 
     if not logger.handlers:
-        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler = logging.FileHandler(log_path, encoding="utf-8-sig")
         formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
         handler.setFormatter(formatter)
         logger.addHandler(handler)
@@ -394,13 +462,14 @@ def _collect_random_attachment_files(base_dir: Path, folder_path: str | None) ->
 
 
 def _build_inline_context(inline_image_paths: dict[str, Path]) -> dict[str, dict[str, str]]:
-    return {
+    context = {
         cid: {
             "cid": cid,
             "path": str(path),
         }
         for cid, path in inline_image_paths.items()
     }
+    return defaultdict(dict, context)
 
 
 def _inject_preview_inline_images(html_body: str, inline_image_paths: dict[str, Path]) -> str:
@@ -411,6 +480,47 @@ def _inject_preview_inline_images(html_body: str, inline_image_paths: dict[str, 
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         preview_html = preview_html.replace(f"cid:{cid}", f"data:{mime_type};base64,{encoded}")
     return preview_html
+
+
+def _prepare_template_context(
+    renderer: TemplateRenderer,
+    template_name: str,
+    context: dict,
+) -> dict:
+    merged = dict(context)
+    reserved = {"recipient", "smtp", "inline_images"}
+    try:
+        required = renderer.extract_template_variables(template_name)
+    except Exception:
+        return merged
+    for name in required:
+        if name in reserved:
+            continue
+        merged.setdefault(name, "")
+    return merged
+
+
+def _find_missing_template_variables(
+    renderer: TemplateRenderer,
+    template_name: str,
+    context: dict,
+) -> list[str]:
+    try:
+        required = renderer.find_undeclared_variables(template_name)
+    except Exception:
+        return []
+
+    provided = set(context.keys())
+    always_available = {
+        "recipient",
+        "smtp",
+        "inline_images",
+        "cycler",
+        "joiner",
+        "namespace",
+        "lipsum",
+    }
+    return sorted(name for name in required if name not in provided and name not in always_available)
 
 
 def _build_dedupe_sent_set(
@@ -478,8 +588,10 @@ def render_preview(
     template_name = template_override or config.message.template
     if template_name not in available_templates:
         raise CampaignError(f"Шаблон не найден: {template_name}")
-
-    inline_image_paths = _resolve_inline_image_paths(base_dir, config.message.inline_images)
+    template_subtype = _template_body_subtype(template_name)
+    inline_image_paths: dict[str, Path] = {}
+    if template_subtype == "html":
+        inline_image_paths = _resolve_inline_image_paths(base_dir, config.message.inline_images)
     if recipient_email:
         recipient_candidates = [r for r in recipients if r.email.lower() == recipient_email.lower()]
         if not recipient_candidates:
@@ -488,26 +600,37 @@ def render_preview(
     else:
         recipient = recipients[0]
 
-    html_body = renderer.render(
-        template_name=template_name,
-        recipient=recipient,
-        context={
-            **config.content,
-            **({"body_text": body_text_override, "message_text": body_text_override} if body_text_override is not None else {}),
-            "subject": config.message.subject,
-            "inline_images": _build_inline_context(inline_image_paths),
-            "smtp": {
-                "host": config.smtp_accounts[0].host,
-                "port": config.smtp_accounts[0].port,
-                "username": config.smtp_accounts[0].username,
-                "from_email": config.smtp_accounts[0].from_email,
-                "from_name": config.smtp_accounts[0].from_name,
-                "use_tls": config.smtp_accounts[0].use_tls,
-                "use_ssl": config.smtp_accounts[0].use_ssl,
+    try:
+        preview_context = _prepare_template_context(
+            renderer,
+            template_name,
+            {
+                **config.content,
+                **({"body_text": body_text_override, "message_text": body_text_override} if body_text_override is not None else {}),
+                "subject": config.message.subject,
+                "inline_images": _build_inline_context(inline_image_paths),
+                "smtp": {
+                    "host": config.smtp_accounts[0].host,
+                    "port": config.smtp_accounts[0].port,
+                    "username": config.smtp_accounts[0].username,
+                    "from_email": config.smtp_accounts[0].from_email,
+                    "from_name": config.smtp_accounts[0].from_name,
+                    "use_tls": config.smtp_accounts[0].use_tls,
+                    "use_ssl": config.smtp_accounts[0].use_ssl,
+                },
             },
-        },
-    )
-    html_body = _inject_preview_inline_images(html_body, inline_image_paths)
+        )
+        html_body = renderer.render(
+            template_name=template_name,
+            recipient=recipient,
+            context=preview_context,
+        )
+    except TemplateRenderError as error:
+        raise CampaignError(f"Ошибка рендера шаблона: {error}") from error
+    if template_subtype == "html":
+        html_body = _inject_preview_inline_images(html_body, inline_image_paths)
+    else:
+        html_body = _plain_text_to_preview_html(html_body)
     output_path = preview_path or (base_dir / "preview" / "email_preview.html")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html_body, encoding="utf-8")
@@ -528,6 +651,8 @@ def run_campaign(
     templates_path: Path,
     dry_run: bool = False,
     template_override: str | None = None,
+    template_mode: str | None = None,
+    template_variants: list[str] | None = None,
     subject_override: str | None = None,
     subject_mode: str | None = None,
     subject_variants: list[str] | None = None,
@@ -619,8 +744,26 @@ def run_campaign(
     if runtime_template_name not in available_templates:
         raise CampaignError(f"Шаблон не найден: {runtime_template_name}")
 
+    runtime_template_mode_key = (template_mode or "fixed").strip().lower()
+    if runtime_template_mode_key not in {"fixed", "random_recipient", "round_robin"}:
+        runtime_template_mode_key = "fixed"
+    runtime_template_variants = [str(item).strip() for item in (template_variants or []) if str(item).strip()]
+    runtime_template_variants = [name for name in runtime_template_variants if name in available_templates]
+    if runtime_template_mode_key in {"random_recipient", "round_robin"} and not runtime_template_variants:
+        runtime_template_variants = [runtime_template_name]
+    runtime_template_round_robin_index = 0
+
     attachment_paths = _resolve_attachment_paths(base_dir, config.message.attachments)
-    inline_image_paths = _resolve_inline_image_paths(base_dir, config.message.inline_images)
+    inline_image_paths_html: dict[str, Path] | None = None
+
+    def _resolve_template_assets(template_name: str) -> tuple[str, dict[str, Path]]:
+        nonlocal inline_image_paths_html
+        subtype = _template_body_subtype(template_name)
+        if subtype == "html":
+            if inline_image_paths_html is None:
+                inline_image_paths_html = _resolve_inline_image_paths(base_dir, config.message.inline_images)
+            return subtype, inline_image_paths_html
+        return subtype, {}
     random_attachment_files = []
     if config.message.random_attachments_folder:
         random_attachment_files = _collect_random_attachment_files(base_dir, config.message.random_attachments_folder)
@@ -630,7 +773,19 @@ def run_campaign(
     runtime_smtp_accounts = list(config.smtp_accounts)
     # --- Загрузка списка прокси ---
     proxy_file = (base_dir / (proxy_file_override or "config/proxies.txt"))
-    proxies = load_proxies(proxy_file) if proxy_file.exists() else []
+    proxy_type_default = str(getattr(config.smtp_accounts[0], "proxy_type", "") or "socks5")
+    proxy_user_default = getattr(config.smtp_accounts[0], "proxy_user", None)
+    proxy_pass_default = getattr(config.smtp_accounts[0], "proxy_pass", None)
+    proxies = (
+        load_proxies(
+            proxy_file,
+            default_proxy_type=proxy_type_default,
+            default_proxy_user=proxy_user_default,
+            default_proxy_pass=proxy_pass_default,
+        )
+        if proxy_file.exists()
+        else []
+    )
 
     # --- Reply-To list ---
     reply_to_candidates = _load_reply_to_list(base_dir)
@@ -681,7 +836,7 @@ def run_campaign(
         emit(f"🔄 SMTP-аккаунты обновлены: {len(runtime_smtp_accounts)}")
 
     def _reload_template_and_subject_runtime() -> None:
-        nonlocal runtime_template_name, runtime_subject_mode_key, runtime_subject_variants, runtime_subject_campaign_value
+        nonlocal runtime_template_name, runtime_template_mode_key, runtime_template_variants, runtime_template_round_robin_index, runtime_subject_mode_key, runtime_subject_variants, runtime_subject_campaign_value, inline_image_paths_html
         if runtime_overrides_getter is None:
             return
         try:
@@ -691,13 +846,36 @@ def run_campaign(
             return
 
         new_template = str(options.get("template_override") or "").strip()
-        if new_template and new_template != runtime_template_name:
-            current_templates = renderer.list_templates()
-            if new_template in current_templates:
-                runtime_template_name = new_template
-                emit(f"🔄 Шаблон обновлён: {runtime_template_name}")
-            else:
-                emit(f"⚠️ Шаблон не найден, оставлен текущий: {new_template}")
+        current_templates = renderer.list_templates()
+
+        new_template_mode = str(options.get("template_mode") or runtime_template_mode_key).strip().lower()
+        if new_template_mode not in {"fixed", "random_recipient", "round_robin"}:
+            new_template_mode = runtime_template_mode_key
+
+        raw_template_variants = options.get("template_variants")
+        if isinstance(raw_template_variants, list):
+            new_template_variants = [str(item).strip() for item in raw_template_variants if str(item).strip()]
+            new_template_variants = [name for name in new_template_variants if name in current_templates]
+        else:
+            new_template_variants = list(runtime_template_variants)
+
+        if new_template and new_template not in current_templates:
+            emit(f"⚠️ Шаблон не найден, оставлен текущий: {new_template}")
+            new_template = runtime_template_name
+
+        if new_template:
+            runtime_template_name = new_template
+
+        runtime_template_mode_key = new_template_mode
+        if runtime_template_mode_key in {"random_recipient", "round_robin"}:
+            runtime_template_variants = new_template_variants or [runtime_template_name]
+        else:
+            runtime_template_variants = []
+        runtime_template_round_robin_index = 0
+        inline_image_paths_html = None
+        emit(
+            f"🔄 Шаблон обновлён: mode={runtime_template_mode_key}, current={runtime_template_name}, variants={len(runtime_template_variants) if runtime_template_variants else 0}"
+        )
 
         new_subject_mode = str(options.get("subject_mode") or runtime_subject_mode_key).strip().lower()
         if new_subject_mode not in {"fixed", "random_campaign", "random_recipient"}:
@@ -752,7 +930,7 @@ def run_campaign(
             time.sleep(min(0.2, end_at - now))
 
     def _send_task(recipient_index: int, recipient: Recipient, mailer_settings, proxy_list, reply_to_candidates):
-        nonlocal successful, failed, processed
+        nonlocal successful, failed, processed, runtime_template_round_robin_index
         local_mailer = SMTPMailer(deepcopy(mailer_settings))
 
         proxy_info = "none"
@@ -795,6 +973,16 @@ def run_campaign(
         else:
             message_settings.subject = runtime_subject_campaign_value
 
+        selected_template_name = runtime_template_name
+        if runtime_template_mode_key == "random_recipient" and runtime_template_variants:
+            selected_template_name = random.choice(runtime_template_variants)
+        elif runtime_template_mode_key == "round_robin" and runtime_template_variants:
+            idx = runtime_template_round_robin_index % len(runtime_template_variants)
+            selected_template_name = runtime_template_variants[idx]
+            runtime_template_round_robin_index += 1
+
+        selected_template_subtype, selected_inline_images = _resolve_template_assets(selected_template_name)
+
         smtp_account = local_mailer.settings.from_email
         recipient_key = recipient.email.strip().lower()
         recipient_text_context: dict[str, str] = {}
@@ -805,25 +993,33 @@ def run_campaign(
                 "message_text": recipient_text,
             }
 
-        html_body = renderer.render(
-            template_name=runtime_template_name,
-            recipient=recipient,
-            context={
-                **config.content,
-                **recipient_text_context,
-                "subject": message_settings.subject,
-                "inline_images": _build_inline_context(inline_image_paths),
-                "smtp": {
-                    "host": local_mailer.settings.host,
-                    "port": local_mailer.settings.port,
-                    "username": local_mailer.settings.username,
-                    "from_email": local_mailer.settings.from_email,
-                    "from_name": local_mailer.settings.from_name,
-                    "use_tls": local_mailer.settings.use_tls,
-                    "use_ssl": local_mailer.settings.use_ssl,
+        try:
+            runtime_context = _prepare_template_context(
+                renderer,
+                selected_template_name,
+                {
+                    **config.content,
+                    **recipient_text_context,
+                    "subject": message_settings.subject,
+                    "inline_images": _build_inline_context(selected_inline_images),
+                    "smtp": {
+                        "host": local_mailer.settings.host,
+                        "port": local_mailer.settings.port,
+                        "username": local_mailer.settings.username,
+                        "from_email": local_mailer.settings.from_email,
+                        "from_name": local_mailer.settings.from_name,
+                        "use_tls": local_mailer.settings.use_tls,
+                        "use_ssl": local_mailer.settings.use_ssl,
+                    },
                 },
-            },
-        )
+            )
+            html_body = renderer.render(
+                template_name=selected_template_name,
+                recipient=recipient,
+                context=runtime_context,
+            )
+        except TemplateRenderError as error:
+            raise CampaignError(f"Ошибка рендера шаблона для {recipient.email}: {error}") from error
 
         recipient_attachment_paths = list(attachment_paths)
         if random_attachment_files:
@@ -848,8 +1044,9 @@ def run_campaign(
                     recipient=recipient,
                     message_settings=message_settings,
                     html_body=html_body,
+                    body_subtype=selected_template_subtype,
                     attachment_paths=recipient_attachment_paths,
-                    inline_image_paths=inline_image_paths,
+                    inline_image_paths=selected_inline_images,
                     retry_attempts=config.delivery.retry_attempts,
                     retry_backoff_seconds=config.delivery.retry_backoff_seconds,
                     before_attempt=_apply_proxy_for_attempt,
@@ -887,16 +1084,18 @@ def run_campaign(
             "smtp_account": smtp_account,
             "proxy": proxy_info,
             "reply_to": selected_reply_to or "",
+            "template": selected_template_name,
             "dry_run": str(dry_run).lower(),
         }
 
     logger.info(
-        "Старт кампании: dry_run=%s, recipients=%s, template=%s, attachments=%s, inline_images=%s, smtp_accounts=%s, dedupe=%s, reply_to_mode=%s, reply_to_candidates=%s, config_reply_to=%s",
+        "Старт кампании: dry_run=%s, recipients=%s, template=%s, template_mode=%s, template_variants=%s, attachments=%s, smtp_accounts=%s, dedupe=%s, reply_to_mode=%s, reply_to_candidates=%s, config_reply_to=%s",
         dry_run,
         len(recipients),
         runtime_template_name,
+        runtime_template_mode_key,
+        len(runtime_template_variants),
         len(attachment_paths),
-        len(inline_image_paths),
         len(runtime_smtp_accounts),
         config.delivery.skip_previously_sent,
         reply_to_mode,
@@ -970,7 +1169,7 @@ def run_campaign(
                             "recipient": result["recipient"],
                             "status": result["status"],
                             "subject": result["subject"],
-                            "template": runtime_template_name,
+                            "template": result["template"],
                             "smtp_account": result["smtp_account"],
                             "proxy": result["proxy"],
                             "reply_to": result["reply_to"],
@@ -1007,7 +1206,7 @@ def run_campaign(
                     "recipient": result["recipient"],
                     "status": result["status"],
                     "subject": result["subject"],
-                    "template": runtime_template_name,
+                    "template": result["template"],
                     "smtp_account": result["smtp_account"],
                     "proxy": result["proxy"],
                     "reply_to": result["reply_to"],

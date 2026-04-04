@@ -101,30 +101,37 @@ class SMTPMailer:
         recipient: Recipient,
         message_settings: MessageSettings,
         html_body: str,
+        body_subtype: str = "html",
         attachment_paths: Optional[list[Path]] = None,
         inline_image_paths: Optional[dict[str, Path]] = None,
     ) -> EmailMessage:
         message = EmailMessage()
-        message["Subject"] = message_settings.subject
+        subject_text = str(message_settings.subject or "").strip()
+        if subject_text:
+            message["Subject"] = subject_text
         message["From"] = f"{self.settings.from_name} <{self.settings.from_email}>"
         message["To"] = recipient.email
         if message_settings.reply_to:
             message["Reply-To"] = message_settings.reply_to
-        message.set_content("Для просмотра письма используйте HTML-совместимый клиент.")
-        message.add_alternative(html_body, subtype="html")
-        html_part = message.get_payload()[-1]
-        for cid, inline_path in (inline_image_paths or {}).items():
-            content = inline_path.read_bytes()
-            mime_type, _ = mimetypes.guess_type(inline_path.name)
-            maintype, subtype = (mime_type or "application/octet-stream").split("/", maxsplit=1)
-            html_part.add_related(
-                content,
-                maintype=maintype,
-                subtype=subtype,
-                cid=f"<{cid}>",
-                filename=inline_path.name,
-                disposition="inline",
-            )
+        normalized_subtype = (body_subtype or "html").strip().lower()
+        if normalized_subtype == "plain":
+            message.set_content(html_body, subtype="plain")
+        else:
+            message.set_content("Для просмотра письма используйте HTML-совместимый клиент.")
+            message.add_alternative(html_body, subtype="html")
+            html_part = message.get_payload()[-1]
+            for cid, inline_path in (inline_image_paths or {}).items():
+                content = inline_path.read_bytes()
+                mime_type, _ = mimetypes.guess_type(inline_path.name)
+                maintype, subtype = (mime_type or "application/octet-stream").split("/", maxsplit=1)
+                html_part.add_related(
+                    content,
+                    maintype=maintype,
+                    subtype=subtype,
+                    cid=f"<{cid}>",
+                    filename=inline_path.name,
+                    disposition="inline",
+                )
         for attachment_path in attachment_paths or []:
             content = attachment_path.read_bytes()
             mime_type, _ = mimetypes.guess_type(attachment_path.name)
@@ -176,6 +183,7 @@ class SMTPMailer:
         recipient: Recipient,
         message_settings: MessageSettings,
         html_body: str,
+        body_subtype: str = "html",
         attachment_paths: Optional[list[Path]] = None,
         inline_image_paths: Optional[dict[str, Path]] = None,
     ) -> None:
@@ -183,6 +191,7 @@ class SMTPMailer:
             recipient,
             message_settings,
             html_body,
+            body_subtype,
             attachment_paths,
             inline_image_paths,
         )

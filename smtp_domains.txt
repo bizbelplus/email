@@ -1,0 +1,30 @@
+# SMTP Домены — автоопределение настроек сервера по домену email-адреса
+# Формат: @домен;smtp_хост:порт:1:тип_соединения
+# Тип соединения: 1=plain (без шифрования), 2=SSL/TLS (порт 465), 3=STARTTLS (порт 587/2525)
+#
+# Добавляйте свои домены прямо здесь или через кнопку «🗂 SMTP Домены» в интерфейсе.
+
+@mail.ru;smtp.mail.ru:2525:1:3
+@inbox.ru;smtp.mail.ru:2525:1:3
+@list.ru;smtp.mail.ru:2525:1:3
+@pochta.ru;smtp.mail.ru:2525:1:3
+@bk.ru;smtp.mail.ru:2525:1:3
+@gmail.com;smtp.gmail.com:465:1:2
+@googlemail.com;smtp.gmail.com:465:1:2
+@yandex.kz;smtp.yandex.ru:465:1:2
+@yandex.by;smtp.yandex.ru:465:1:2
+@yandex.md;smtp.yandex.ru:465:1:2
+@yandex.ua;smtp.yandex.ru:465:1:2
+@yandex.ru;smtp.yandex.ru:465:1:2
+@ya.ru;smtp.yandex.ru:465:1:2
+@yandex.com;smtp.yandex.ru:465:1:2
+@rambler.ru;smtp.rambler.ru:465:1:2
+@lenta.ru;smtp.rambler.ru:465:1:2
+@myrambler.ru;smtp.rambler.ru:465:1:2
+@autorambler.ru;smtp.rambler.ru:465:1:2
+@ro.ru;smtp.rambler.ru:465:1:2
+@rambler.ua;smtp.rambler.ru:465:1:2
+@yahoo.com;smtp.mail.yahoo.com:465:1:2
+@outlook.com;smtp.outlook.com:25:1:1
+@hotmail.com;smtp.office365.com:587:1:3
+@live.com;smtp.office365.com:587:1:3

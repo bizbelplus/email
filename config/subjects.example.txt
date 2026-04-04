@@ -1,0 +1,5 @@
+Привет, {{ recipient.имя | default(recipient.name) }}
+Специальное предложение для {{ recipient.компания | default(recipient.company) | default("вашей компании") }}
+Ваше письмо готово к отправке
+Персональное предложение для {{ recipient.email }}
+Новости и обновления на этой неделе

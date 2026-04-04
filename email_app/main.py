@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -48,6 +49,16 @@ def _to_portable_path(value: str, base_dir: Path) -> str:
         return text
 
 
+def _ensure_default_config(base_dir: Path) -> None:
+    config_dir = base_dir / "config"
+    settings_path = config_dir / "settings.yaml"
+    example_path = config_dir / "settings.example.yaml"
+    if settings_path.exists() or not example_path.exists():
+        return
+    config_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(example_path, settings_path)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="SMTP-приложение для отправки HTML-писем по списку получателей"
@@ -60,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--recipients",
         default="recipients.csv",
-        help="Путь до CSV со столбцом email",
+        help="Путь до CSV (столбец email) или TXT (по одному email на строку)",
     )
     parser.add_argument(
         "--templates",
@@ -75,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--template",
         default=None,
-        help="Переопределить имя HTML-шаблона из папки templates",
+        help="Переопределить имя шаблона (HTML/TXT) из папки templates",
     )
     parser.add_argument(
         "--delay-seconds",
@@ -164,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     base_dir = _get_base_dir()
+    _ensure_default_config(base_dir)
 
     try:
         if args.preset:
@@ -208,7 +220,13 @@ def main() -> int:
             print(f"Очередь экспортирована: {exported_path}")
             return 0
 
-        if args.modern_gui:
+        # При запуске собранного .exe без аргументов запускаем modern GUI по умолчанию
+        _is_frozen = getattr(sys, "frozen", False)
+        _no_cli_flags = not any([
+            args.preview, args.preflight, args.yes, args.save_preset,
+            args.export_queue, args.queue_file, args.show_stats, args.export_stats,
+        ])
+        if args.modern_gui or (_is_frozen and _no_cli_flags and not args.gui):
             launch_modern_gui(base_dir=base_dir, preset_path=(base_dir / args.preset) if args.preset else None)
             return 0
 

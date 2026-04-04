@@ -296,23 +296,23 @@
                   <img src="cid:{{ inline_images.hero.cid }}" alt="Hero" style="display:block;max-width:168px;height:auto;border:0;">
                 </p>
                 {% endif %}
-                <h1 class="title">{{ приветствие }}</h1>
-                <p class="subtitle">{{ кратко }}😑</p>
+                <h1 class="title">{{ приветствие | default(headline) }}</h1>
+                <p class="subtitle">{{ кратко | default(preheader) }}</p>
               </td>
             </tr>
             <tr>
               <td class="content">
                 <p class="greeting">Здравствуйте{% if recipient.имя %}, {{ recipient.имя }}{% endif %}!</p>
-                <p class="paragraph">{{ вступление }}</p>
+                <p class="paragraph">{{ вступление | default(body_intro) }}</p>
 
                 <div class="highlight-box">
                   <p class="highlight-label">Коротко</p>
-                  <p class="highlight-text">{{ текст }}</p>
+                  <p class="highlight-text">{{ текст | default(body_text) }}</p>
                 </div>
 
-                {% if ссылка_кнопки and кнопка %}
+                {% if (ссылка_кнопки | default(cta_url)) and (кнопка | default(cta_label)) %}
                 <div class="cta-wrap">
-                  <a href="{{ ссылка_кнопки }}" class="button">{{ кнопка }}</a>
+                  <a href="{{ ссылка_кнопки | default(cta_url) }}" class="button">{{ кнопка | default(cta_label) }}</a>
                 </div>
                 {% endif %}
 

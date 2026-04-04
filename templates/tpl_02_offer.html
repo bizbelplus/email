@@ -1,0 +1,36 @@
+﻿<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Шаблон #2 — Спецпредложение</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f6f8;font-family:Arial,sans-serif;color:#1f2937;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f6f8;padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="background:#ffffff;border-radius:12px;overflow:hidden;">
+          <tr>
+            <td style="padding:24px 28px;background:#0f172a;color:#ffffff;">
+              <h1 style="margin:0;font-size:24px;line-height:1.3;">{{ offer_title }}</h1>
+              <p style="margin:8px 0 0;font-size:14px;opacity:0.9;">Спецпредложение</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px 28px;">
+              <p style="margin:0 0 12px;">Здравствуйте, {{ recipient.first_name | default('друг') }}!</p>
+              <p style="margin:0 0 12px;">Это письмо «Спецпредложение» для {{ company }}.</p>
+              <p style="margin:0 0 20px;">Промокод: <strong>{{ promo_code | random }}</strong>. Ваша выгода: <strong>{{ discount }}</strong>.</p>
+              <p style="margin:0 0 20px;">
+                <a href="{{ cta_url }}" style="display:inline-block;padding:12px 20px;background:#0ea5e9;color:#ffffff;text-decoration:none;border-radius:8px;">{{ cta_text }}</a>
+              </p>
+              <p style="margin:0 0 8px;color:#4b5563;">Поддержка: {{ support_email }} | {{ support_phone }}</p>
+              <p style="margin:0;color:#6b7280;font-size:13px;">Если письма больше не актуальны: <a href="{{ unsubscribe_url }}">отписаться</a></p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

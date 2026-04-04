@@ -76,11 +76,19 @@ class ModernEmailAppGUI:
         self.templates_var = ctk.StringVar(value="templates")
         self.smtp_accounts_file_var = ctk.StringVar(value="")
         self.template_var = ctk.StringVar(value="")
+        self.template_mode_var = ctk.StringVar(value="single")  # single | random | round_robin
+        self.attachment_mode_var = ctk.StringVar(value="none")  # none | single | random
+        self.single_attachment_var = ctk.StringVar(value="")
         self.attachments_folder_var = ctk.StringVar(value="")
         self.proxy_file_var = ctk.StringVar(value="config/proxies.txt")
-        self.subjects_file_var = ctk.StringVar(value="")
+        self.proxy_type_var = ctk.StringVar(value="socks5")
+        self.proxy_auth_user_var = ctk.StringVar(value="")
+        self.proxy_auth_pass_var = ctk.StringVar(value="")
+        self.subjects_file_var = ctk.StringVar(value="config/subjects.txt")
         self._subjects_list: list[str] = []
-        self.subjects_mode_var = ctk.StringVar(value="random")  # "random" | "fixed"
+        self.subjects_mode_var = ctk.StringVar(value="manual")  # manual | file_fixed | file_random
+        self.subject_manual_var = ctk.StringVar(value="")
+        self.subject_pick_var = ctk.StringVar(value="")
         self.external_editor_path = ctk.StringVar(value="")
         self.proxy_enabled_var = ctk.BooleanVar(value=True)
         self.live_preview_var = ctk.BooleanVar(value=True)
@@ -111,9 +119,14 @@ class ModernEmailAppGUI:
         self._build()
         self._setup_mousewheel_scrolling()
         self._on_theme_change(self.theme_var.get())
+        self.proxy_type_var.trace_add("write", lambda *_: self._sync_proxy_defaults_to_config())
+        self.proxy_auth_user_var.trace_add("write", lambda *_: self._sync_proxy_defaults_to_config())
+        self.proxy_auth_pass_var.trace_add("write", lambda *_: self._sync_proxy_defaults_to_config())
         self._load_last_session()
+        self._load_proxy_and_attachments_from_config()
         if self.current_preset_path:
             self._load_preset(self.current_preset_path, silent=True)
+            self._load_proxy_and_attachments_from_config()
         self._refresh_templates()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(150, self._poll_queue)
@@ -138,6 +151,14 @@ class ModernEmailAppGUI:
             font=("", 20, "bold"),
             text_color=("gray10", "gray90"),
         ).grid(row=0, column=0, sticky="w")
+
+        self.ctk.CTkButton(
+            header_row,
+            text="❓ Помощь",
+            width=120,
+            command=self._open_user_help,
+            fg_color=("gray70", "gray30"),
+        ).grid(row=0, column=2, sticky="e", padx=(8, 0))
         
         # Theme switcher
         theme_frame = self.ctk.CTkFrame(header_row, fg_color="transparent")
@@ -155,7 +176,16 @@ class ModernEmailAppGUI:
         # === ПУТИ И КОНФИГ (Раздел 1) ===
         config_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
         config_section.pack(fill="x", padx=16, pady=8)
-        self.ctk.CTkLabel(config_section, text="📋 Конфигурация", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 8))
+        config_header = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        config_header.pack(fill="x", padx=12, pady=(12, 4))
+        self.ctk.CTkLabel(config_header, text="📋 Конфигурация", font=("", 14, "bold")).pack(side="left")
+        self.ctk.CTkButton(config_header, text="❓", width=36, command=lambda: self._open_user_help("config")).pack(side="right")
+        self.ctk.CTkLabel(
+            config_section,
+            text="Кратко: здесь выбираются получатели, шаблоны, SMTP-аккаунты, темы, Reply-To и прокси.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", padx=12, pady=(0, 8))
 
         config_info = self.ctk.CTkFrame(config_section, fg_color="transparent")
         config_info.pack(fill="x", padx=12, pady=(0, 8))
@@ -167,6 +197,12 @@ class ModernEmailAppGUI:
         ).pack(anchor="w")
 
         self._add_path_row(config_section, 1, "Получатели", self.recipients_var, self._select_recipients)
+        self.ctk.CTkLabel(
+            config_section,
+            text="Подсказка: TXT (1 email в строке) или CSV (столбец email + доп. переменные).",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", padx=14, pady=(0, 4))
         _rcp_info = self.ctk.CTkFrame(config_section, fg_color="transparent")
         _rcp_info.pack(fill="x", padx=14, pady=(0, 4))
         self.recipients_count_label = self.ctk.CTkLabel(_rcp_info, text="", font=("", 10), text_color=("gray40", "gray60"))
@@ -174,17 +210,51 @@ class ModernEmailAppGUI:
         self.eta_estimate_label = self.ctk.CTkLabel(_rcp_info, text="", font=("", 10), text_color=("gray40", "gray60"))
         self.eta_estimate_label.pack(side="left", padx=(16, 0))
         self._add_path_row(config_section, 2, "Шаблоны", self.templates_var, self._select_templates)
+        self.ctk.CTkLabel(
+            config_section,
+            text="Подсказка: выберите папку с .html/.txt шаблонами; режим шаблона задаётся ниже.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", padx=14, pady=(0, 4))
         self._add_path_row(config_section, 3, "SMTP аккаунты", self.smtp_accounts_file_var, self._select_smtp_accounts_file)
+        self.ctk.CTkLabel(
+            config_section,
+            text="Подсказка: TXT login:password или CSV аккаунтов; можно использовать разные SMTP.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", padx=14, pady=(0, 4))
         self._add_path_row(config_section, 4, "Темы писем", self.subjects_file_var, self._select_subjects_file)
+        self.ctk.CTkLabel(
+            config_section,
+            text="Подсказка: TXT, одна тема в строке; по умолчанию используется config/subjects.txt.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", padx=14, pady=(0, 6))
 
         subjects_mode_row = self.ctk.CTkFrame(config_section, fg_color="transparent")
         subjects_mode_row.pack(fill="x", padx=14, pady=(0, 6))
-        self.ctk.CTkLabel(subjects_mode_row, text="Режим темы:").grid(row=0, column=0, sticky="w")
-        self.ctk.CTkRadioButton(subjects_mode_row, text="Случайная для каждого", variable=self.subjects_mode_var, value="random").grid(row=0, column=1, padx=(8, 4))
-        self.ctk.CTkRadioButton(subjects_mode_row, text="Одна для всей кампании", variable=self.subjects_mode_var, value="campaign").grid(row=0, column=2, padx=4)
+        self.ctk.CTkLabel(subjects_mode_row, text="Тема письма:").grid(row=0, column=0, sticky="w")
+        self.ctk.CTkRadioButton(subjects_mode_row, text="Написать вручную", variable=self.subjects_mode_var, value="manual").grid(row=0, column=1, padx=(8, 4))
+        self.ctk.CTkRadioButton(subjects_mode_row, text="Из файла: выбранная", variable=self.subjects_mode_var, value="file_fixed").grid(row=0, column=2, padx=4)
+        self.ctk.CTkRadioButton(subjects_mode_row, text="Из файла: случайная", variable=self.subjects_mode_var, value="file_random").grid(row=0, column=3, padx=4)
+
+        self.subject_manual_row = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        self.subject_manual_row.pack(fill="x", padx=14, pady=(0, 6))
+        self.subject_manual_row.grid_columnconfigure(1, weight=1)
+        self.ctk.CTkLabel(self.subject_manual_row, text="Тема вручную:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkEntry(self.subject_manual_row, textvariable=self.subject_manual_var).grid(row=0, column=1, sticky="ew")
+
+        self.subject_pick_row = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        self.subject_pick_row.pack(fill="x", padx=14, pady=(0, 6))
+        self.subject_pick_row.grid_columnconfigure(1, weight=1)
+        self.ctk.CTkLabel(self.subject_pick_row, text="Тема из файла:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.subject_pick_combo = self.ctk.CTkComboBox(self.subject_pick_row, variable=self.subject_pick_var, values=[""])
+        self.subject_pick_combo.grid(row=0, column=1, sticky="ew")
+        self.subjects_mode_var.trace_add("write", lambda *_: self._on_subject_mode_change())
 
         # === REPLY-TO / PROXY (в блоке Конфигурация) ===
         replyto_section = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        self._replyto_section = replyto_section
         replyto_section.pack(fill="x", padx=12, pady=(6, 8))
         self.ctk.CTkLabel(replyto_section, text="Reply-To (адрес для ответов):").grid(row=0, column=0, sticky="w")
         self.replyto_var = self.ctk.StringVar(value="")
@@ -192,12 +262,24 @@ class ModernEmailAppGUI:
         self.replyto_combo.grid(row=0, column=1, padx=(8, 8))
         self.ctk.CTkButton(replyto_section, text="Загрузить txt", command=self._load_replyto_txt).grid(row=0, column=2)
         self.ctk.CTkLabel(replyto_section, textvariable=self.replyto_count_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4,0))
+        self.ctk.CTkLabel(
+            replyto_section,
+            text="Подсказка: можно загрузить TXT (1 email в строке) или оставить пусто и отправлять без Reply-To.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         replyto_mode_section = self.ctk.CTkFrame(config_section, fg_color="transparent")
         replyto_mode_section.pack(fill="x", padx=12, pady=(0,8))
         self.ctk.CTkLabel(replyto_mode_section, text="Режим Reply-To:").grid(row=0, column=0, sticky="w")
         self.ctk.CTkRadioButton(replyto_mode_section, text="Случайный для каждого", variable=self.replyto_mode_var, value="random").grid(row=0, column=1, padx=4)
         self.ctk.CTkRadioButton(replyto_mode_section, text="Фиксированный выбранный", variable=self.replyto_mode_var, value="fixed").grid(row=0, column=2, padx=4)
+        self.ctk.CTkLabel(
+            replyto_mode_section,
+            text="Подсказка: случайный — для ротации адресов ответа, фиксированный — один адрес для всей кампании.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         proxy_section = self.ctk.CTkFrame(config_section, fg_color="transparent")
         proxy_section.pack(fill="x", padx=12, pady=(0, 8))
@@ -208,6 +290,43 @@ class ModernEmailAppGUI:
         self.ctk.CTkLabel(proxy_file_row, text="Файл прокси:").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.ctk.CTkEntry(proxy_file_row, textvariable=self.proxy_file_var).grid(row=0, column=1, sticky="ew", padx=(0, 8))
         self.ctk.CTkButton(proxy_file_row, text="📁", width=36, command=self._select_proxy_file).grid(row=0, column=2)
+
+        proxy_mode_row = self.ctk.CTkFrame(proxy_section, fg_color="transparent")
+        proxy_mode_row.pack(fill="x", pady=(6, 0))
+        proxy_mode_row.grid_columnconfigure(1, weight=1)
+        self.ctk.CTkLabel(proxy_mode_row, text="Тип прокси:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.proxy_type_combo = self.ctk.CTkComboBox(
+            proxy_mode_row,
+            variable=self.proxy_type_var,
+            values=["socks5", "socks4", "http"],
+            state="readonly",
+            width=160,
+        )
+        self.proxy_type_combo.grid(row=0, column=1, sticky="w")
+
+        proxy_auth_row = self.ctk.CTkFrame(proxy_section, fg_color="transparent")
+        proxy_auth_row.pack(fill="x", pady=(6, 0))
+        proxy_auth_row.grid_columnconfigure(1, weight=1)
+        proxy_auth_row.grid_columnconfigure(3, weight=1)
+        self.ctk.CTkLabel(proxy_auth_row, text="Логин прокси:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkEntry(proxy_auth_row, textvariable=self.proxy_auth_user_var).grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        self.ctk.CTkLabel(proxy_auth_row, text="Пароль прокси:").grid(row=0, column=2, sticky="w", padx=(0, 8))
+        self.ctk.CTkEntry(proxy_auth_row, textvariable=self.proxy_auth_pass_var, show="*").grid(row=0, column=3, sticky="ew")
+
+        self.ctk.CTkLabel(
+            proxy_section,
+            text="Поддержка форматов файла: host:port@user:pass, host:port:type[:user:pass], host:port",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", pady=(4, 0))
+        self.ctk.CTkLabel(
+            proxy_section,
+            text="Подсказка: если прокси не нужны, снимите чекбокс; если нужны — задайте файл и тип (socks5/socks4/http).",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", pady=(2, 0))
+
+        self._on_subject_mode_change()
 
         # Кнопка менеджера SMTP-доменов
         domains_btn_frame = self.ctk.CTkFrame(config_section, fg_color="transparent")
@@ -230,6 +349,14 @@ class ModernEmailAppGUI:
         ).pack(side="left", padx=(8, 0))
         self.ctk.CTkButton(
             domains_btn_frame,
+            text="✨ Базовые переменные",
+            command=self._add_base_content_variables,
+            width=220,
+            height=30,
+            fg_color=("gray70", "gray30"),
+        ).pack(side="left", padx=(8, 0))
+        self.ctk.CTkButton(
+            domains_btn_frame,
             text="⚙️ Мастер настройки",
             command=self._open_settings_wizard,
             width=190,
@@ -242,28 +369,68 @@ class ModernEmailAppGUI:
         # === ШАБЛОН И ОПЦИИ (Раздел 2) ===
         template_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
         template_section.pack(fill="x", padx=16, pady=8)
-        self.ctk.CTkLabel(template_section, text="🎨 Шаблон & Опции", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 8))
+        template_header = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        template_header.pack(fill="x", padx=12, pady=(12, 4))
+        self.ctk.CTkLabel(template_header, text="🎨 Шаблон & Опции", font=("", 14, "bold")).pack(side="left")
+        self.ctk.CTkButton(template_header, text="❓", width=36, command=lambda: self._open_user_help("template")).pack(side="right")
+        self.ctk.CTkLabel(
+            template_section,
+            text="Кратко: тут выбираются шаблон, режим вложений и параметры отправки (задержка, retry, лимиты).",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", padx=12, pady=(0, 8))
         
         template_row = self.ctk.CTkFrame(template_section, fg_color="transparent")
         template_row.pack(fill="x", padx=12, pady=8)
         template_row.grid_columnconfigure(0, weight=1)
-        self.ctk.CTkLabel(template_row, text="Выбор шаблона:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkLabel(template_row, text="Выбор шаблона (HTML/TXT):").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.template_combo = self.ctk.CTkComboBox(template_row, variable=self.template_var, values=[])
         self.template_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8))
         self.ctk.CTkButton(template_row, text="↻ Обновить", width=90, command=self._refresh_templates).grid(row=0, column=2)
 
-        attachments_folder_row = self.ctk.CTkFrame(template_section, fg_color="transparent")
-        attachments_folder_row.pack(fill="x", padx=12, pady=(0, 8))
-        attachments_folder_row.grid_columnconfigure(0, weight=1)
-        self.ctk.CTkLabel(attachments_folder_row, text="Папка вложений:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.ctk.CTkEntry(attachments_folder_row, textvariable=self.attachments_folder_var, width=360).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-        self.ctk.CTkButton(attachments_folder_row, text="📁", command=self._select_attachments_folder).grid(row=0, column=2)
-        self.attachments_info_label = self.ctk.CTkLabel(attachments_folder_row, text="Файлов: 0")
+        template_mode_row = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        template_mode_row.pack(fill="x", padx=12, pady=(0, 6))
+        self.ctk.CTkLabel(template_mode_row, text="Режим шаблона:").grid(row=0, column=0, sticky="w")
+        self.ctk.CTkRadioButton(template_mode_row, text="Один шаблон", variable=self.template_mode_var, value="single").grid(row=0, column=1, padx=(8, 4))
+        self.ctk.CTkRadioButton(template_mode_row, text="Случайный для каждого", variable=self.template_mode_var, value="random").grid(row=0, column=2, padx=4)
+        self.ctk.CTkRadioButton(template_mode_row, text="По порядку (round-robin)", variable=self.template_mode_var, value="round_robin").grid(row=0, column=3, padx=4)
+        self.template_pool_info_label = self.ctk.CTkLabel(template_mode_row, text="")
+        self.template_pool_info_label.grid(row=0, column=4, padx=(12, 0), sticky="w")
+        self.ctk.CTkLabel(
+            template_mode_row,
+            text="Подсказка: один шаблон — всем; случайный — каждому случайно; по порядку — чередование по кругу.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(4, 0))
+        self.template_mode_var.trace_add("write", lambda *_: self._refresh_templates())
+
+        attachments_mode_row = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        attachments_mode_row.pack(fill="x", padx=12, pady=(0, 6))
+        self.ctk.CTkLabel(attachments_mode_row, text="Вложения:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkRadioButton(attachments_mode_row, text="Нет", variable=self.attachment_mode_var, value="none").grid(row=0, column=1, padx=(8, 4))
+        self.ctk.CTkRadioButton(attachments_mode_row, text="Один файл", variable=self.attachment_mode_var, value="single").grid(row=0, column=2, padx=4)
+        self.ctk.CTkRadioButton(attachments_mode_row, text="Random из папки", variable=self.attachment_mode_var, value="random").grid(row=0, column=3, padx=4)
+
+        self.single_attachment_row = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        self.single_attachment_row.pack(fill="x", padx=12, pady=(0, 6))
+        self.single_attachment_row.grid_columnconfigure(1, weight=1)
+        self.ctk.CTkLabel(self.single_attachment_row, text="Файл вложения:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkEntry(self.single_attachment_row, textvariable=self.single_attachment_var, width=360).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.ctk.CTkButton(self.single_attachment_row, text="📄", command=self._select_single_attachment_file).grid(row=0, column=2)
+
+        self.random_attachments_row = self.ctk.CTkFrame(template_section, fg_color="transparent")
+        self.random_attachments_row.pack(fill="x", padx=12, pady=(0, 8))
+        self.random_attachments_row.grid_columnconfigure(1, weight=1)
+        self.ctk.CTkLabel(self.random_attachments_row, text="Папка вложений:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.ctk.CTkEntry(self.random_attachments_row, textvariable=self.attachments_folder_var, width=360).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.ctk.CTkButton(self.random_attachments_row, text="📁", command=self._select_attachments_folder).grid(row=0, column=2)
+        self.attachments_info_label = self.ctk.CTkLabel(self.random_attachments_row, text="Файлов: 0")
         self.attachments_info_label.grid(row=1, column=0, columnspan=3, sticky="w", padx=(0, 8), pady=(4, 0))
 
         template_meta_row = self.ctk.CTkFrame(template_section, fg_color="transparent")
         template_meta_row.pack(fill="x", padx=12, pady=(0, 8))
         template_meta_row.grid_columnconfigure(0, weight=1)
+        self._attachments_anchor_row = template_meta_row
         self.template_vars_label = self.ctk.CTkLabel(template_meta_row, text="Переменных в шаблоне: 0")
         self.template_vars_label.grid(row=0, column=0, sticky="w")
         self.ctk.CTkButton(template_meta_row, text="Проверить переменные", command=self._check_template_variables).grid(row=0, column=1, padx=(8,0))
@@ -273,6 +440,9 @@ class ModernEmailAppGUI:
             command=self._show_template_variables_hint,
             fg_color=("gray70", "gray30"),
         ).grid(row=0, column=2, padx=(8, 0))
+
+        self.attachment_mode_var.trace_add("write", lambda *_: self._on_attachment_mode_change())
+        self._on_attachment_mode_change()
 
         # Сетка опций: delay, rate limit, retry
         options_frame = self.ctk.CTkFrame(template_section, fg_color="transparent")
@@ -322,7 +492,16 @@ class ModernEmailAppGUI:
         # === ДЕЙСТВИЯ (Раздел 3) ===
         actions_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
         actions_section.pack(fill="x", padx=16, pady=8)
-        self.ctk.CTkLabel(actions_section, text="⚡ Действия", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 8))
+        actions_header = self.ctk.CTkFrame(actions_section, fg_color="transparent")
+        actions_header.pack(fill="x", padx=12, pady=(12, 4))
+        self.ctk.CTkLabel(actions_header, text="⚡ Действия", font=("", 14, "bold")).pack(side="left")
+        self.ctk.CTkButton(actions_header, text="❓", width=36, command=lambda: self._open_user_help("actions")).pack(side="right")
+        self.ctk.CTkLabel(
+            actions_section,
+            text="Кратко: здесь запуск, тесты SMTP/прокси, предпросмотр, редакторы и пресеты.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", padx=12, pady=(0, 8))
 
         buttons_frame = self.ctk.CTkFrame(actions_section, fg_color="transparent")
         buttons_frame.pack(fill="x", padx=12, pady=8)
@@ -333,7 +512,7 @@ class ModernEmailAppGUI:
             ("▶️  Старт", self._start_send, 0),
             ("📊 Статистика", self._show_stats, 1),
             ("👁️ Предпросмотр", self._preview_email, 2),
-            ("✏️ Редактор HTML", self._open_template_editor, 3),
+            ("✏️ Редактор шаблона", self._open_template_editor, 3),
             ("🎨 Визуальный", self._open_visual_template_editor, 4),
             ("💾 Пресет", self._save_preset_dialog, 5),
         ]
@@ -392,9 +571,8 @@ class ModernEmailAppGUI:
         ).grid(row=0, column=3, sticky="ew", padx=4)
 
         button_specs2 = [
-            ("📂 Очередь JSON", self._run_queue_dialog, 4),
-            ("💾 Экспорт JSON/CSV", self._export_queue_dialog, 5),
-            ("📂 Загрузить пресет", self._load_preset_dialog, 6),
+            ("💾 Экспорт JSON/CSV", self._export_queue_dialog, 4),
+            ("📂 Загрузить пресет", self._load_preset_dialog, 5),
         ]
         for label, command, col in button_specs2:
             self.ctk.CTkButton(
@@ -409,9 +587,13 @@ class ModernEmailAppGUI:
         # === ПРОГРЕСС (Раздел 4) ===
         progress_section = self.ctk.CTkFrame(main_container, fg_color=("gray88", "gray25"), corner_radius=12)
         progress_section.pack(fill="x", padx=16, pady=8)
+        progress_header = self.ctk.CTkFrame(progress_section, fg_color="transparent")
+        progress_header.pack(fill="x", padx=12, pady=(10, 2))
+        self.ctk.CTkLabel(progress_header, text="📈 Прогресс", font=("", 14, "bold")).pack(side="left")
+        self.ctk.CTkButton(progress_header, text="❓", width=36, command=lambda: self._open_user_help("progress")).pack(side="right")
 
         pb_row = self.ctk.CTkFrame(progress_section, fg_color="transparent")
-        pb_row.pack(fill="x", padx=12, pady=(10, 4))
+        pb_row.pack(fill="x", padx=12, pady=(2, 4))
         pb_row.grid_columnconfigure(1, weight=1)
         self.ctk.CTkLabel(pb_row, text="Прогресс:").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.progress_bar = self.ctk.CTkProgressBar(pb_row, mode="determinate")
@@ -452,7 +634,16 @@ class ModernEmailAppGUI:
         # === ЛОГ (Раздел 5) ===
         log_section = self.ctk.CTkFrame(main_container, fg_color=("gray95", "gray20"), corner_radius=12)
         log_section.pack(fill="both", expand=True, padx=16, pady=(8, 16))
-        self.ctk.CTkLabel(log_section, text="📝 Лог отправки", font=("", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 8))
+        log_header = self.ctk.CTkFrame(log_section, fg_color="transparent")
+        log_header.pack(fill="x", padx=12, pady=(12, 4))
+        self.ctk.CTkLabel(log_header, text="📝 Лог отправки", font=("", 14, "bold")).pack(side="left")
+        self.ctk.CTkButton(log_header, text="❓", width=36, command=lambda: self._open_user_help("log")).pack(side="right")
+        self.ctk.CTkLabel(
+            log_section,
+            text="Кратко: лог показывает каждый шаг, успехи и ошибки по адресам.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", padx=12, pady=(0, 8))
         
         log_buttons = self.ctk.CTkFrame(log_section, fg_color="transparent")
         log_buttons.pack(fill="x", padx=12, pady=(0, 8))
@@ -837,7 +1028,7 @@ class ModernEmailAppGUI:
                         raise ValueError("Заполните SMTP поля: " + ", ".join(missing))
 
                 message_payload = {
-                    "subject": msg_subject_var.get().strip() or "Без темы",
+                    "subject": msg_subject_var.get().strip(),
                     "template": msg_template_var.get().strip(),
                     "reply_to": msg_reply_to_var.get().strip() or None,
                     "attachments": list((raw.get("message") or {}).get("attachments") or []),
@@ -935,6 +1126,22 @@ class ModernEmailAppGUI:
     def _show_template_variables_hint(self) -> None:
         recipients_file = self.recipients_var.get().strip() or "recipients.csv"
         smtp_accounts_file = self.smtp_accounts_file_var.get().strip() or "(не выбран)"
+        recipient_fields_text = "   {{ recipient.email }}\n   {{ recipient.name }}"
+        try:
+            recipients_path = self.base_dir / recipients_file
+            loaded = load_recipients(recipients_path)
+            dynamic_keys: set[str] = set()
+            for recipient in loaded[:200]:
+                dynamic_keys.update(key for key in recipient.data.keys() if key)
+            preferred = ["email", "name"]
+            ordered = [key for key in preferred if key in dynamic_keys] + sorted(
+                key for key in dynamic_keys if key not in preferred
+            )
+            if ordered:
+                recipient_fields_text = "\n".join(f"   {{{{ recipient.{key} }}}}" for key in ordered)
+        except Exception:
+            pass
+
         messagebox.showinfo(
             "Подсказка {{...}}",
             "Как использовать переменные в шаблоне:\n\n"
@@ -944,8 +1151,7 @@ class ModernEmailAppGUI:
             "2) Случайное значение из списка:\n"
             "   {{ приветствие | random }}\n\n"
             "3) Данные получателя:\n"
-            "   {{ recipient.email }}\n"
-            "   {{ recipient.name }}\n\n"
+            f"{recipient_fields_text}\n\n"
             "4) Поля из recipients.csv/txt:\n"
             "   {{ recipient.phone }}\n"
             "   {{ recipient.city }}\n\n"
@@ -983,6 +1189,156 @@ class ModernEmailAppGUI:
         if path:
             self.attachments_folder_var.set(self._relative(Path(path)))
             self._update_random_attachment_count()
+            self._sync_attachments_to_config()
+
+    def _select_single_attachment_file(self) -> None:
+        path = filedialog.askopenfilename(
+            initialdir=self.base_dir,
+            filetypes=[("Все файлы", "*.*")],
+        )
+        if path:
+            self.single_attachment_var.set(self._relative(Path(path)))
+            self._sync_attachments_to_config()
+
+    def _on_attachment_mode_change(self) -> None:
+        mode = self.attachment_mode_var.get().strip() or "none"
+        anchor = getattr(self, "_attachments_anchor_row", None)
+        if mode == "single":
+            if anchor is not None:
+                self.single_attachment_row.pack(fill="x", padx=12, pady=(0, 6), before=anchor)
+            else:
+                self.single_attachment_row.pack(fill="x", padx=12, pady=(0, 6))
+            self.random_attachments_row.pack_forget()
+        elif mode == "random":
+            self.single_attachment_row.pack_forget()
+            if anchor is not None:
+                self.random_attachments_row.pack(fill="x", padx=12, pady=(0, 8), before=anchor)
+            else:
+                self.random_attachments_row.pack(fill="x", padx=12, pady=(0, 8))
+            self._update_random_attachment_count()
+        else:
+            self.single_attachment_row.pack_forget()
+            self.random_attachments_row.pack_forget()
+        self._sync_attachments_to_config()
+
+    def _help_texts(self) -> dict[str, str]:
+        return {
+            "all": (
+                "Быстрый план работы:\n\n"
+                "1) Конфигурация\n"
+                "- Получатели: CSV или TXT.\n"
+                "- Шаблоны: папка с HTML/TXT.\n"
+                "- SMTP аккаунты: файл аккаунтов.\n"
+                "- Тема: можно написать вручную или взять из TXT (выбранную/случайную).\n"
+                "- Reply-To: адрес для ответа (необязательно).\n"
+                "- Прокси: файл прокси + тип (если нужен).\n\n"
+                "2) Шаблон и опции\n"
+                "- Выберите шаблон и режим: один/случайный/по порядку.\n"
+                "- Настройте вложения: нет / один файл / random из папки.\n"
+                "- Нажмите «Проверить переменные».\n"
+                "- Если переменных не хватает, добавьте их в «Переменные {{...}}».\n\n"
+                "3) Проверки\n"
+                "- Тест SMTP (все): проверка входа по аккаунтам.\n"
+                "- Тест прокси: проверка доступности прокси и SMTP-туннеля.\n"
+                "- Предпросмотр: как выглядит письмо до отправки.\n\n"
+                "4) Отправка\n"
+                "- Сначала Dry-run.\n"
+                "- Потом реальная отправка кнопкой «Старт».\n"
+                "- В прогрессе видно сколько отправлено, ошибок и ETA.\n\n"
+                "5) Если ошибка\n"
+                "- Откройте лог.\n"
+                "- Посмотрите причину по конкретному адресу.\n"
+                "- Исправьте данные и повторите запуск."
+            ),
+            "config": (
+                "Конфигурация: что заполнять\n\n"
+                "Получатели\n"
+                "- TXT: один email в строке.\n"
+                "- CSV: нужен столбец email; остальные столбцы = переменные.\n\n"
+                "Шаблоны\n"
+                "- Папка с файлами .html или .txt.\n\n"
+                "SMTP аккаунты\n"
+                "- Формат login:password (по одному в строке) или CSV.\n\n"
+                "Темы писем\n"
+                "- Можно написать тему вручную прямо в поле.\n"
+                "- Или выбрать TXT (одна тема в строке): взять одну выбранную тему или случайную.\n\n"
+                "Reply-To\n"
+                "- Необязательно. Если пусто, письма уйдут без Reply-To после подтверждения.\n\n"
+                "Прокси\n"
+                "- Можно не использовать.\n"
+                "- Если используете: задайте файл и тип прокси."
+            ),
+            "template": (
+                "Шаблон и опции\n\n"
+                "Выбор шаблона\n"
+                "- HTML: письмо уйдет как HTML.\n"
+                "- TXT: письмо уйдет как обычный текст без HTML-части.\n\n"
+                "Режим шаблона\n"
+                "- Один шаблон: выбранный шаблон всем.\n"
+                "- Случайный: каждому получателю случайный шаблон из папки.\n"
+                "- По порядку: шаблоны чередуются по кругу.\n\n"
+                "Вложения\n"
+                "- Нет: вложения не отправляются.\n"
+                "- Один файл: один и тот же файл всем.\n"
+                "- Random из папки: каждому письму случайный файл из папки.\n\n"
+                "Переменные\n"
+                "- Нажмите «Проверить переменные».\n"
+                "- Если чего-то не хватает, добавьте в «Переменные {{...}}" 
+                "или в CSV получателей."
+            ),
+            "actions": (
+                "Действия\n\n"
+                "Старт\n"
+                "- Запускает отправку по текущим настройкам.\n\n"
+                "Предпросмотр\n"
+                "- Показывает письмо до отправки.\n\n"
+                "Тест SMTP (все)\n"
+                "- Проверяет доступ/логин у каждого SMTP-аккаунта.\n\n"
+                "Тест прокси\n"
+                "- Проверяет доступность прокси и туннель до SMTP.\n\n"
+                "Пресеты\n"
+                "- Сохраняют и загружают набор настроек для повторного запуска."
+            ),
+            "progress": (
+                "Прогресс отправки\n\n"
+                "- Прогресс-бар: сколько уже обработано.\n"
+                "- Отправлено: успешные отправки.\n"
+                "- Ошибки: неуспешные отправки.\n"
+                "- Осталось/ETA: оценка времени до завершения.\n\n"
+                "Кнопки\n"
+                "- Пауза: временно останавливает.\n"
+                "- Стоп: завершает текущую кампанию.\n"
+                "- Список ошибок: показывает только проблемные адреса."
+            ),
+            "log": (
+                "Лог отправки\n\n"
+                "- В лог пишется каждый шаг.\n"
+                "- Для ошибки есть причина (пароль, лимит, соединение и т.д.).\n"
+                "- Можно открыть лог-файл и быстро найти проблему.\n\n"
+                "Совет\n"
+                "- Если что-то не отправляется, сначала смотрите лог, потом исправляйте настройки."
+            ),
+        }
+
+    def _open_user_help(self, section: str = "all") -> None:
+        texts = self._help_texts()
+        content = texts.get(section, texts["all"])
+
+        win = self.ctk.CTkToplevel(self.root)
+        win.title("Помощь")
+        win.geometry("920x700")
+        win.grab_set()
+
+        head = self.ctk.CTkFrame(win, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(12, 8))
+        self.ctk.CTkLabel(head, text="Помощник пользователя", font=("", 16, "bold")).pack(side="left")
+
+        body = self.ctk.CTkTextbox(win, wrap="word")
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        body.insert("1.0", content)
+        body.configure(state="disabled")
+
+        self.ctk.CTkButton(win, text="Закрыть", command=win.destroy).pack(pady=(0, 12))
 
     def _select_proxy_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -1000,12 +1356,54 @@ class ModernEmailAppGUI:
             raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
             smtp = raw.get("smtp") or {}
             smtp["proxy_file"] = self._portable_path_value(proxy_file)
+            smtp["proxy_type"] = (self.proxy_type_var.get().strip().lower() or "socks5")
+            smtp["proxy_user"] = self.proxy_auth_user_var.get().strip() or None
+            smtp["proxy_pass"] = self.proxy_auth_pass_var.get().strip() or None
             raw["smtp"] = smtp
             config_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
             self._append_log(f"Прокси-файл подключён: {proxy_file}")
             self.status_var.set("✓ Прокси-файл подключён")
         except Exception as error:  # noqa: BLE001
             messagebox.showerror("Прокси", f"Не удалось обновить конфиг: {error}")
+
+    def _sync_proxy_defaults_to_config(self) -> None:
+        config_path = self.base_dir / self.config_var.get()
+        if not config_path.exists():
+            return
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            smtp = raw.get("smtp") or {}
+            smtp["proxy_type"] = (self.proxy_type_var.get().strip().lower() or "socks5")
+            smtp["proxy_user"] = self.proxy_auth_user_var.get().strip() or None
+            smtp["proxy_pass"] = self.proxy_auth_pass_var.get().strip() or None
+            raw["smtp"] = smtp
+            config_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        except Exception:
+            return
+
+    def _sync_attachments_to_config(self) -> None:
+        config_path = self.base_dir / self.config_var.get()
+        if not config_path.exists():
+            return
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            message_raw = raw.get("message") or {}
+            mode = self.attachment_mode_var.get().strip() or "none"
+            if mode == "single":
+                selected = self.single_attachment_var.get().strip()
+                message_raw["attachments"] = [self._portable_path_value(selected)] if selected else []
+                message_raw["random_attachments_folder"] = ""
+            elif mode == "random":
+                selected_folder = self.attachments_folder_var.get().strip()
+                message_raw["attachments"] = []
+                message_raw["random_attachments_folder"] = self._portable_path_value(selected_folder) if selected_folder else ""
+            else:
+                message_raw["attachments"] = []
+                message_raw["random_attachments_folder"] = ""
+            raw["message"] = message_raw
+            config_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        except Exception:
+            return
 
     # ------------------------------------------------------------------ #
     # Темы писем (subjects TXT)                                           #
@@ -1035,14 +1433,129 @@ class ModernEmailAppGUI:
             messagebox.showerror("Темы", f"Не удалось загрузить файл тем: {error}")
             return
         self._subjects_list = subjects
+        self.subject_pick_combo.configure(values=subjects or [""])
+        current_pick = (self.subject_pick_var.get() or "").strip()
+        if subjects:
+            if current_pick not in subjects:
+                self.subject_pick_var.set(subjects[0])
+        else:
+            self.subject_pick_var.set("")
         self._subjects_count_label.configure(text=f"Тем загружено: {len(subjects)}")
         self._append_log(f"Загружено тем: {len(subjects)} из {self.subjects_file_var.get()}")
+
+    def _on_subject_mode_change(self) -> None:
+        mode = (self.subjects_mode_var.get() or "manual").strip()
+        anchor = getattr(self, "_replyto_section", None)
+        if mode == "manual":
+            self.subject_pick_row.pack_forget()
+            if anchor is not None:
+                self.subject_manual_row.pack(fill="x", padx=14, pady=(0, 6), before=anchor)
+            else:
+                self.subject_manual_row.pack(fill="x", padx=14, pady=(0, 6))
+            return
+        self.subject_manual_row.pack_forget()
+        if anchor is not None:
+            self.subject_pick_row.pack(fill="x", padx=14, pady=(0, 6), before=anchor)
+        else:
+            self.subject_pick_row.pack(fill="x", padx=14, pady=(0, 6))
+
+    def _resolve_template_options(self) -> tuple[str | None, str, list[str]]:
+        mode = (self.template_mode_var.get() or "single").strip().lower()
+        template_selected = (self.template_var.get() or "").strip()
+
+        template_dir = self.base_dir / self.templates_var.get()
+        renderer = TemplateRenderer(template_dir)
+        variants = renderer.list_templates()
+
+        if mode == "single":
+            return (template_selected or None), "fixed", []
+
+        if not variants and template_selected:
+            variants = [template_selected]
+
+        if mode == "round_robin":
+            return (template_selected or None), "round_robin", list(variants)
+
+        return (template_selected or None), "random_recipient", list(variants)
+
+    def _add_base_content_variables(self) -> None:
+        config_path = self.base_dir / self.config_var.get()
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            raw = {}
+
+        base_values: dict[str, object] = {
+            "first_name": "Иван",
+            "last_name": "Иванов",
+            "full_name": "Иван Иванов",
+            "city": "Москва",
+            "company": "Example LLC",
+            "position": "Менеджер",
+            "phone": "+7 (900) 000-00-00",
+            "promo_code": ["WELCOME10", "SPRING15", "BONUS20"],
+            "discount": "10%",
+            "offer_title": "Специальное предложение",
+            "product_name": "Ваш продукт",
+            "cta_text": "Узнать подробнее",
+            "cta_url": "https://example.com",
+            "support_email": "support@example.com",
+            "support_phone": "+7 (800) 000-00-00",
+            "sender_name": "Отдел продаж",
+            "unsubscribe_url": "https://example.com/unsubscribe?email={{ recipient.email }}",
+            "preheader": "Короткий анонс письма",
+            "today_date": "04.04.2026",
+        }
+
+        content_data = dict(raw.get("content") or {})
+        added = 0
+        for key, value in base_values.items():
+            if key not in content_data:
+                content_data[key] = value
+                added += 1
+
+        raw["content"] = content_data
+        try:
+            config_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            self._append_log(f"Добавлены базовые переменные: {added}")
+            messagebox.showinfo("Переменные", f"Готово. Добавлено переменных: {added}")
+        except Exception as error:  # noqa: BLE001
+            messagebox.showerror("Переменные", f"Не удалось обновить settings.yaml: {error}")
+
+    def _resolve_subject_options(self) -> tuple[str | None, str, list[str]]:
+        mode = (self.subjects_mode_var.get() or "manual").strip()
+        manual_subject = (self.subject_manual_var.get() or "").strip()
+
+        if mode == "manual":
+            return manual_subject or None, "fixed", []
+
+        variants = list(self._subjects_list)
+        if mode == "file_fixed":
+            picked = (self.subject_pick_var.get() or "").strip()
+            if not picked and variants:
+                picked = variants[0]
+                self.subject_pick_var.set(picked)
+            return picked or None, "fixed", []
+
+        if variants:
+            return None, "random_recipient", variants
+
+        # Если файл тем пуст/не загружен — откатываемся к ручной теме.
+        return manual_subject or None, "fixed", []
 
     def _pick_random_subject(self) -> str | None:
         """Случайно выбирает тему из загруженного списка (или None если список пуст)."""
         if self._subjects_list:
             import random as _random
             return _random.choice(self._subjects_list)
+        return None
+
+    def _pick_message_text(self) -> str | None:
+        """Возвращает текст письма для предпросмотра.
+
+        Сейчас отдельный источник body_text в GUI не используется,
+        поэтому предпросмотр берёт значение из config/content.
+        """
         return None
 
     # ------------------------------------------------------------------ #
@@ -1479,6 +1992,11 @@ class ModernEmailAppGUI:
         else:
             self.template_combo.configure(values=[""])
             self.template_var.set("")
+        mode = (self.template_mode_var.get() or "single").strip()
+        if mode == "single":
+            self.template_pool_info_label.configure(text=f"Шаблонов в папке: {len(templates)}")
+        else:
+            self.template_pool_info_label.configure(text=f"В ротации: {len(templates)}")
 
     def _pick_random_replyto(self) -> str:
         emails = [e.strip() for e in self.replyto_combo.cget("values") if str(e).strip()]
@@ -1518,13 +2036,41 @@ class ModernEmailAppGUI:
 
         self._update_random_attachment_count()
 
+        template_override, template_mode, template_variants = self._resolve_template_options()
+        preflight_template = template_override
+        if not preflight_template and template_variants:
+            preflight_template = template_variants[0]
+
+        if not preflight_template:
+            messagebox.showerror("Email App Modern", "Не выбран шаблон письма.")
+            return
+
+        if self.template_mode_var.get() in {"random", "round_robin"} and not template_variants:
+            messagebox.showerror("Email App Modern", "Для выбранного режима нужен минимум один шаблон в папке templates.")
+            return
+
+        if self.subjects_mode_var.get() in {"file_fixed", "file_random"} and not self._subjects_list:
+            subjects_rel = (self.subjects_file_var.get() or "").strip()
+            if subjects_rel:
+                subjects_path = self.base_dir / subjects_rel
+                if subjects_path.exists():
+                    self._load_subjects_file(subjects_path)
+
+        if self.subjects_mode_var.get() in {"file_fixed", "file_random"} and not self._subjects_list:
+            messagebox.showerror("Email App Modern", "Выбран режим темы из файла, но список тем пуст. Загрузите TXT с темами или выберите режим 'Написать вручную'.")
+            return
+
+        if self.subjects_mode_var.get() == "file_fixed" and not (self.subject_pick_var.get() or "").strip():
+            messagebox.showerror("Email App Modern", "Выберите тему из списка или переключитесь на 'Написать вручную'.")
+            return
+
         try:
             preflight = run_preflight(
                 base_dir=self.base_dir,
                 config_path=self.base_dir / self.config_var.get(),
                 recipients_path=self.base_dir / self.recipients_var.get(),
                 templates_path=self.base_dir / self.templates_var.get(),
-                template_override=self.template_var.get() or None,
+                template_override=preflight_template,
                 body_text_override=None,
             )
         except CampaignError as error:
@@ -1555,8 +2101,16 @@ class ModernEmailAppGUI:
         # Рандомный выбор Reply-To
         reply_to_random = self._pick_random_replyto()
         if not reply_to_random:
-            messagebox.showerror("Reply-To", "Не выбран ни один email для Reply-To!")
-            return
+            proceed_without_reply_to = messagebox.askyesno(
+                "Reply-To",
+                "Не выбран ни один email для Reply-To.\n\n"
+                "Отправить письма без Reply-To?",
+            )
+            if not proceed_without_reply_to:
+                self.status_var.set("⊘ Отправка отменена")
+                return
+            self._append_log("⚠️ Reply-To не указан: отправка будет выполнена без Reply-To")
+            reply_to_random = ""
         self.replyto_var.set(reply_to_random)
 
         mode_label = "фиксированный" if self.replyto_mode_var.get() == "fixed" else "случайный"
@@ -1616,7 +2170,7 @@ class ModernEmailAppGUI:
                     template=self.template_var.get() or None,
                     delay_seconds=float(self.delay_var.get().strip() or "0"),
                     dry_run=self.dry_run_var.get(),
-                    attachments_folder=self._portable_path_value(self.attachments_folder_var.get()) or None,
+                    attachments_folder=(self._portable_path_value(self.attachments_folder_var.get()) or None) if self.attachment_mode_var.get() == "random" else None,
                     use_proxy=self.proxy_enabled_var.get(),
                     proxy_file=self._portable_path_value(self.proxy_file_var.get()) or None,
                     rate_limit_per_minute=(int(self.rate_limit_var.get().strip()) if self.rate_limit_var.get().strip() else None),
@@ -1667,6 +2221,8 @@ class ModernEmailAppGUI:
             
             # Передать reply_to в message
             config.message.reply_to = self.replyto_var.get()
+            template_override, template_mode, template_variants = self._resolve_template_options()
+            subject_override, subject_mode, subject_variants = self._resolve_subject_options()
 
             summary = run_campaign(
                 base_dir=self.base_dir,
@@ -1674,14 +2230,16 @@ class ModernEmailAppGUI:
                 recipients_path=self.base_dir / self.recipients_var.get(),
                 templates_path=self.base_dir / self.templates_var.get(),
                 dry_run=self.dry_run_var.get(),
-                template_override=self.template_var.get() or None,
-                subject_override=None,
-                subject_mode=("random_recipient" if self.subjects_mode_var.get() == "random" else "random_campaign") if self._subjects_list else "fixed",
-                subject_variants=list(self._subjects_list),
+                template_override=template_override,
+                template_mode=template_mode,
+                template_variants=template_variants,
+                subject_override=subject_override,
+                subject_mode=subject_mode,
+                subject_variants=subject_variants,
                 body_text_override=None,
                 body_text_mode="fixed",
                 body_text_variants=[],
-                random_attachments_folder_override=self.attachments_folder_var.get() or None,
+                random_attachments_folder_override=(self.attachments_folder_var.get().strip() or None) if self.attachment_mode_var.get() == "random" else None,
                 use_proxy=self.proxy_enabled_var.get(),
                 proxy_file_override=self.proxy_file_var.get().strip() or None,
                 delay_override=delay,
@@ -1733,15 +2291,23 @@ class ModernEmailAppGUI:
             return items
 
         def _getter() -> dict[str, object]:
-            template_override = (self.template_var.get() or "").strip() or None
+            template_override, template_mode, template_variants = self._resolve_template_options()
             subjects_rel = (self.subjects_file_var.get() or "").strip()
             subject_variants = _load_subjects_from_file(subjects_rel)
-            subject_mode = "fixed"
-            if subject_variants:
-                subject_mode = "random_recipient" if self.subjects_mode_var.get() == "random" else "random_campaign"
+            subject_override, subject_mode, local_variants = self._resolve_subject_options()
+
+            if self.subjects_mode_var.get() == "file_random":
+                # Для режима random всегда перечитываем файл на лету, чтобы подхватывать изменения.
+                if not subject_variants:
+                    subject_variants = list(self._subjects_list)
+            else:
+                subject_variants = local_variants
 
             return {
                 "template_override": template_override,
+                "template_mode": template_mode,
+                "template_variants": template_variants,
+                "subject_override": subject_override,
                 "subject_mode": subject_mode,
                 "subject_variants": subject_variants,
             }
@@ -1890,6 +2456,12 @@ class ModernEmailAppGUI:
                 recipient_email=self.preview_recipient_var.get() or None,
                 open_in_browser=True,
             )
+            preview_html = summary.preview_path.read_text(encoding="utf-8")
+            self._show_preview_window(
+                preview_html,
+                summary.preview_path,
+                mobile=bool(self.mobile_preview_var.get()),
+            )
             message = (
                 f"Предпросмотр сохранён: {summary.preview_path}\n"
                 f"Шаблон: {summary.template_name}\n"
@@ -1910,6 +2482,10 @@ class ModernEmailAppGUI:
                 f"Выбранный шаблон: '{selected_template}'\n"
                 f"Папка шаблонов: {template_dir}"
             )
+            self._append_log(log_message)
+            messagebox.showerror("Email App Modern", log_message)
+        except Exception as error:  # noqa: BLE001
+            log_message = f"Неожиданная ошибка предпросмотра: {error}"
             self._append_log(log_message)
             messagebox.showerror("Email App Modern", log_message)
 
@@ -1953,7 +2529,7 @@ class ModernEmailAppGUI:
     def _current_template_path(self) -> Path:
         template_name = self.template_var.get().strip()
         if not template_name:
-            raise CampaignError("Не выбран HTML-шаблон")
+            raise CampaignError("Не выбран шаблон")
         return self.base_dir / self.templates_var.get() / template_name
 
     def _current_history_csv_path(self) -> Path:
@@ -1972,7 +2548,7 @@ class ModernEmailAppGUI:
 
         if self.editor_window is None or not self.editor_window.winfo_exists():
             self.editor_window = self.ctk.CTkToplevel(self.root)
-            self.editor_window.title("Редактор HTML-шаблона")
+            self.editor_window.title("Редактор шаблона")
             self.editor_window.geometry("1000x760")
 
             toolbar = self.ctk.CTkFrame(self.editor_window)
@@ -2030,6 +2606,12 @@ class ModernEmailAppGUI:
     def _open_visual_template_editor(self) -> None:
         try:
             template_path = self._current_template_path()
+            if template_path.suffix.lower() == ".txt":
+                messagebox.showinfo(
+                    "Email App Modern",
+                    "Для TXT-шаблонов используйте кнопку «✏️ Редактор шаблона» или внешний редактор.",
+                )
+                return
             editor_url = self.rich_editor_server.open_template(template_path)
         except CampaignError as error:
             messagebox.showerror("Email App Modern", str(error))
@@ -2301,13 +2883,73 @@ class ModernEmailAppGUI:
                 messagebox.showinfo("Переменные шаблона", "Шаблон не выбран")
                 return
             vars_set = renderer.extract_template_variables(template_name)
+            undeclared = renderer.find_undeclared_variables(template_name)
             self.template_vars_label.configure(text=f"Переменных в шаблоне: {len(vars_set)}")
+            available: set[str] = {"recipient", "smtp", "inline_images", "subject", "body_text", "message_text"}
+            try:
+                raw = yaml.safe_load((self.base_dir / self.config_var.get()).read_text(encoding="utf-8")) or {}
+                available.update(str(key) for key in (raw.get("content") or {}).keys())
+            except Exception:
+                pass
+            try:
+                recipients = load_recipients(self.base_dir / self.recipients_var.get())
+                if recipients:
+                    available.update(str(key) for key in recipients[0].data.keys())
+            except Exception:
+                pass
+            missing = sorted(name for name in undeclared if name not in available and name not in {"cycler", "joiner", "namespace", "lipsum"})
             if vars_set:
-                messagebox.showinfo("Переменные шаблона", "Найденные переменные:\n" + "\n".join(sorted(vars_set)))
+                text = "Найденные переменные:\n" + "\n".join(sorted(vars_set))
+                if missing:
+                    text += "\n\n⚠️ Нет значений для переменных:\n" + "\n".join(missing)
+                    text += "\n\nДобавьте переменные в config/content или в CSV получателей."
+                messagebox.showinfo("Переменные шаблона", text)
+                if missing:
+                    add_now = messagebox.askyesno(
+                        "Переменные шаблона",
+                        "Найдены недостающие переменные.\n\n"
+                        "Добавить их автоматически в «Переменные письма» (config/content)?",
+                    )
+                    if add_now:
+                        added_count = self._add_missing_content_variables(missing)
+                        self._append_log(f"Добавлено переменных в content: {added_count}")
+                        messagebox.showinfo(
+                            "Переменные шаблона",
+                            f"Добавлено переменных: {added_count}.\n"
+                            "Откроется окно «Переменные письма» для заполнения значений.",
+                        )
+                        self._open_content_variables_manager()
             else:
                 messagebox.showinfo("Переменные шаблона", "Переменные не найдены")
         except Exception as err:
             messagebox.showerror("Переменные шаблона", f"Ошибка при анализе шаблона: {err}")
+
+    def _add_missing_content_variables(self, missing: list[str]) -> int:
+        config_path = self.base_dir / self.config_var.get()
+        if not config_path.exists():
+            return 0
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            raw = {}
+
+        content = dict(raw.get("content") or {})
+        added = 0
+        ignored_prefixes = ("recipient.", "smtp.", "inline_images.")
+        for name in missing:
+            key = str(name).strip()
+            if not key or key in content:
+                continue
+            if key.startswith(ignored_prefixes):
+                continue
+            content[key] = ""
+            added += 1
+
+        if added > 0:
+            raw["content"] = content
+            config_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+        return added
 
     def _on_editor_key_release(self, event=None) -> None:
         if self.editor_live_job:
@@ -2538,6 +3180,7 @@ class ModernEmailAppGUI:
         """Тестирует авторизацию всех SMTP-аккаунтов из пакета."""
         import smtplib
         import socket as _socket
+        import queue as _queue
 
         def _humanize_error_ru(error: Exception | str) -> str:
             raw = str(error)
@@ -2577,15 +3220,15 @@ class ModernEmailAppGUI:
             result_text.insert("end", line + "\n")
             result_text.see("end")
 
-        def run_all() -> None:
+        def run_all(emit: callable) -> None:
             ok = 0
             bad = 0
-            result_text.delete("1.0", "end")
+            emit("Старт теста SMTP...")
+            emit("")
             for idx, smtp in enumerate(accounts, start=1):
-                conn_type = "SSL" if smtp.use_ssl else "STARTTLS" if smtp.use_tls else "plain"
-                append(f"[{idx}/{len(accounts)}] {smtp.username} -> {smtp.host}:{smtp.port} ({conn_type})")
-                win.update()
                 try:
+                    conn_type = "SSL" if smtp.use_ssl else "STARTTLS" if smtp.use_tls else "plain"
+                    emit(f"[{idx}/{len(accounts)}] {smtp.username} -> {smtp.host}:{smtp.port} ({conn_type})")
                     if smtp.use_ssl:
                         conn = smtplib.SMTP_SSL(smtp.host, smtp.port, timeout=smtp.timeout_seconds)
                     else:
@@ -2597,28 +3240,68 @@ class ModernEmailAppGUI:
                     conn.login(smtp.username, smtp.password)
                     conn.quit()
                     ok += 1
-                    append("  ✅ OK")
+                    emit("  ✅ OK")
                 except smtplib.SMTPAuthenticationError as exc:
                     bad += 1
-                    append(f"  ❌ AUTH: {_humanize_error_ru(exc)}")
+                    emit(f"  ❌ AUTH: {_humanize_error_ru(exc)}")
                 except _socket.timeout:
                     bad += 1
-                    append("  ❌ TIMEOUT")
+                    emit("  ❌ TIMEOUT")
                 except Exception as exc:  # noqa: BLE001
                     bad += 1
-                    append(f"  ❌ ERROR: {_humanize_error_ru(exc)}")
+                    emit(f"  ❌ ERROR: {_humanize_error_ru(exc)}")
 
-            append("")
-            append(f"Итог: ✅ {ok} | ❌ {bad}")
+            emit("")
+            emit(f"Итог: ✅ {ok} | ❌ {bad}")
+
+        q: _queue.Queue[tuple[str, object]] = _queue.Queue()
+        state = {"running": False}
+
+        def pump_queue() -> None:
+            if not win.winfo_exists():
+                return
+            while True:
+                try:
+                    kind, payload = q.get_nowait()
+                except _queue.Empty:
+                    break
+                if kind == "line":
+                    append(str(payload))
+                elif kind == "done":
+                    state["running"] = False
+                    run_btn.configure(state="normal")
+            if state["running"]:
+                win.after(80, pump_queue)
+
+        def run_all_async() -> None:
+            if state["running"]:
+                return
+
+            state["running"] = True
+            run_btn.configure(state="disabled")
+            result_text.delete("1.0", "end")
+
+            def _worker() -> None:
+                try:
+                    run_all(lambda line: q.put(("line", line)))
+                except Exception as error:  # noqa: BLE001
+                    q.put(("line", f"❌ Критическая ошибка теста SMTP: {error}"))
+                finally:
+                    q.put(("done", None))
+
+            threading.Thread(target=_worker, daemon=True).start()
+            pump_queue()
 
         btns = self.ctk.CTkFrame(win, fg_color="transparent")
         btns.pack(fill="x", padx=12, pady=(0, 10))
-        self.ctk.CTkButton(btns, text="▶ Запустить тест", command=run_all).pack(side="left")
+        run_btn = self.ctk.CTkButton(btns, text="▶ Запустить тест", command=run_all_async)
+        run_btn.pack(side="left")
         self.ctk.CTkButton(btns, text="✕ Закрыть", command=win.destroy).pack(side="right")
 
     def _test_proxies(self) -> None:
         """Тест прокси: доступность proxy host:port и туннель до SMTP через прокси."""
         import socket
+        import queue as _queue
         try:
             import socks  # type: ignore
         except Exception:
@@ -2690,17 +3373,17 @@ class ModernEmailAppGUI:
                 return "Ошибка авторизации прокси"
             return raw
 
-        def run_test() -> None:
+        def run_test(emit: callable) -> None:
             ok = 0
             bad = 0
             smtp_ready = 0
-            result_text.delete("1.0", "end")
+            emit("Старт теста прокси...")
             if smtp_target_host and smtp_target_port:
-                append(f"Цель для туннеля: {smtp_target_host}:{smtp_target_port}")
+                emit(f"Цель для туннеля: {smtp_target_host}:{smtp_target_port}")
             else:
-                append("Цель для туннеля: не определена (нет SMTP в конфиге)")
-            append("Проверка SMTP-портов через прокси: 465/587 + цели из SMTP-аккаунтов")
-            append("")
+                emit("Цель для туннеля: не определена (нет SMTP в конфиге)")
+            emit("Проверка SMTP-портов через прокси: 465/587 + цели из SMTP-аккаунтов")
+            emit("")
 
             def _connect_via_proxy(proxy: dict, target_host: str, target_port: int, timeout: int = 7) -> tuple[bool, str]:
                 p_host = str(proxy.get("proxy_host") or "")
@@ -2747,42 +3430,41 @@ class ModernEmailAppGUI:
                 host = proxy.get("proxy_host")
                 port = int(proxy.get("proxy_port") or 0)
                 ptype = proxy.get("proxy_type")
-                append(f"[{idx}/{len(proxies)}] {ptype}:{host}:{port}")
-                win.update()
+                emit(f"[{idx}/{len(proxies)}] {ptype}:{host}:{port}")
                 try:
                     with socket.create_connection((str(host), int(port)), timeout=5):
                         pass
-                    append("  ✅ proxy reachable")
+                    emit("  ✅ proxy reachable")
                 except Exception as exc:  # noqa: BLE001
                     bad += 1
-                    append(f"  ❌ proxy unreachable: {_humanize_error_ru(exc)}")
+                    emit(f"  ❌ proxy unreachable: {_humanize_error_ru(exc)}")
                     continue
 
                 if not (smtp_target_host and smtp_target_port):
                     ok += 1
-                    append("  ℹ️ туннель SMTP пропущен")
+                    emit("  ℹ️ туннель SMTP пропущен")
                     continue
 
                 tunnel_ok, tunnel_msg = _connect_via_proxy(proxy, str(smtp_target_host), int(smtp_target_port))
                 if tunnel_ok:
                     ok += 1
-                    append(f"  ✅ SMTP tunnel OK -> {smtp_target_host}:{smtp_target_port}")
+                    emit(f"  ✅ SMTP tunnel OK -> {smtp_target_host}:{smtp_target_port}")
                 else:
                     bad += 1
-                    append(f"  ❌ SMTP tunnel failed: {tunnel_msg}")
+                    emit(f"  ❌ SMTP tunnel failed: {tunnel_msg}")
 
                 probe_465_ok = False
                 probe_587_ok = False
                 for target_host, target_port, label in smtp_probe_targets:
                     probe_ok, probe_msg = _connect_via_proxy(proxy, target_host, target_port, timeout=8)
                     if probe_ok:
-                        append(f"  ✅ {label}: {target_host}:{target_port}")
+                        emit(f"  ✅ {label}: {target_host}:{target_port}")
                         if target_port == 465:
                             probe_465_ok = True
                         if target_port == 587:
                             probe_587_ok = True
                     else:
-                        append(f"  ❌ {label}: {target_host}:{target_port} -> {probe_msg}")
+                        emit(f"  ❌ {label}: {target_host}:{target_port} -> {probe_msg}")
 
                 if probe_465_ok or probe_587_ok:
                     smtp_ready += 1
@@ -2791,16 +3473,55 @@ class ModernEmailAppGUI:
                         ports_ok.append("465")
                     if probe_587_ok:
                         ports_ok.append("587")
-                    append(f"  🟢 SMTP-ready: да (порты: {', '.join(ports_ok)})")
+                    emit(f"  🟢 SMTP-ready: да (порты: {', '.join(ports_ok)})")
                 else:
-                    append("  🔴 SMTP-ready: нет (465/587 недоступны через прокси)")
+                    emit("  🔴 SMTP-ready: нет (465/587 недоступны через прокси)")
 
-            append("")
-            append(f"Итог: ✅ {ok} | ❌ {bad} | SMTP-ready: {smtp_ready}/{len(proxies)}")
+            emit("")
+            emit(f"Итог: ✅ {ok} | ❌ {bad} | SMTP-ready: {smtp_ready}/{len(proxies)}")
+
+        q: _queue.Queue[tuple[str, object]] = _queue.Queue()
+        state = {"running": False}
+
+        def pump_queue() -> None:
+            if not win.winfo_exists():
+                return
+            while True:
+                try:
+                    kind, payload = q.get_nowait()
+                except _queue.Empty:
+                    break
+                if kind == "line":
+                    append(str(payload))
+                elif kind == "done":
+                    state["running"] = False
+                    run_btn.configure(state="normal")
+            if state["running"]:
+                win.after(80, pump_queue)
+
+        def run_test_async() -> None:
+            if state["running"]:
+                return
+
+            state["running"] = True
+            run_btn.configure(state="disabled")
+            result_text.delete("1.0", "end")
+
+            def _worker() -> None:
+                try:
+                    run_test(lambda line: q.put(("line", line)))
+                except Exception as error:  # noqa: BLE001
+                    q.put(("line", f"❌ Критическая ошибка теста прокси: {error}"))
+                finally:
+                    q.put(("done", None))
+
+            threading.Thread(target=_worker, daemon=True).start()
+            pump_queue()
 
         btns = self.ctk.CTkFrame(win, fg_color="transparent")
         btns.pack(fill="x", padx=12, pady=(0, 10))
-        self.ctk.CTkButton(btns, text="▶ Запустить тест", command=run_test).pack(side="left")
+        run_btn = self.ctk.CTkButton(btns, text="▶ Запустить тест", command=run_test_async)
+        run_btn.pack(side="left")
         self.ctk.CTkButton(btns, text="✕ Закрыть", command=win.destroy).pack(side="right")
 
     # ------------------------------------------------------------------ #
@@ -2852,8 +3573,16 @@ class ModernEmailAppGUI:
             "smtp_accounts_file": self.smtp_accounts_file_var.get(),
             "subjects_file": self.subjects_file_var.get(),
             "subjects_mode": self.subjects_mode_var.get(),
+            "subject_manual": self.subject_manual_var.get(),
+            "subject_pick": self.subject_pick_var.get(),
             "template": self.template_var.get(),
+            "template_mode": self.template_mode_var.get(),
+            "attachment_mode": self.attachment_mode_var.get(),
+            "single_attachment": self.single_attachment_var.get(),
             "proxy_file": self.proxy_file_var.get(),
+            "proxy_type": self.proxy_type_var.get(),
+            "proxy_auth_user": self.proxy_auth_user_var.get(),
+            "proxy_auth_pass": self.proxy_auth_pass_var.get(),
             "proxy_enabled": self.proxy_enabled_var.get(),
             "delay": self.delay_var.get(),
             "rate_limit": self.rate_limit_var.get(),
@@ -2891,8 +3620,16 @@ class ModernEmailAppGUI:
             ("smtp_accounts_file", self.smtp_accounts_file_var),
             ("subjects_file", self.subjects_file_var),
             ("subjects_mode", self.subjects_mode_var),
+            ("subject_manual", self.subject_manual_var),
+            ("subject_pick", self.subject_pick_var),
             ("template", self.template_var),
+            ("template_mode", self.template_mode_var),
+            ("attachment_mode", self.attachment_mode_var),
+            ("single_attachment", self.single_attachment_var),
             ("proxy_file", self.proxy_file_var),
+            ("proxy_type", self.proxy_type_var),
+            ("proxy_auth_user", self.proxy_auth_user_var),
+            ("proxy_auth_pass", self.proxy_auth_pass_var),
             ("delay", self.delay_var),
             ("rate_limit", self.rate_limit_var),
             ("retry_attempts", self.retry_attempts_var),
@@ -2907,6 +3644,12 @@ class ModernEmailAppGUI:
         for key, var in str_pairs:
             if key in data and data[key] is not None:
                 var.set(str(data[key]))
+
+        # Обратная совместимость со старыми значениями режима темы.
+        legacy_mode = (self.subjects_mode_var.get() or "").strip().lower()
+        if legacy_mode in {"random", "campaign", "fixed"}:
+            self.subjects_mode_var.set("file_random" if legacy_mode == "random" else "manual")
+        self._on_subject_mode_change()
 
         # Конфиг в упрощённом режиме всегда фиксированный
         self.config_var.set(self.DEFAULT_CONFIG_PATH)
@@ -2928,8 +3671,43 @@ class ModernEmailAppGUI:
         if rcp_path.exists():
             self._update_recipients_count(rcp_path)
 
-        # Перезагрузить темы писем из сохранённого пути
-        subjects = data.get("subjects_file", "")
+    def _load_proxy_and_attachments_from_config(self) -> None:
+        config_path = self.base_dir / self.config_var.get()
+        if not config_path.exists():
+            return
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            return
+
+        smtp_raw = raw.get("smtp") or {}
+        proxy_type = str(smtp_raw.get("proxy_type") or "").strip().lower()
+        if proxy_type in {"socks5", "socks4", "http"}:
+            self.proxy_type_var.set(proxy_type)
+        self.proxy_auth_user_var.set(str(smtp_raw.get("proxy_user") or ""))
+        self.proxy_auth_pass_var.set(str(smtp_raw.get("proxy_pass") or ""))
+
+        message_raw = raw.get("message") or {}
+        if not (self.subject_manual_var.get() or "").strip():
+            self.subject_manual_var.set(str(message_raw.get("subject") or ""))
+        attachments = [str(item).strip() for item in (message_raw.get("attachments") or []) if str(item).strip()]
+        random_folder = str(message_raw.get("random_attachments_folder") or "").strip()
+        if attachments:
+            self.attachment_mode_var.set("single")
+            self.single_attachment_var.set(attachments[0])
+            self.attachments_folder_var.set("")
+        elif random_folder:
+            self.attachment_mode_var.set("random")
+            self.attachments_folder_var.set(random_folder)
+            self.single_attachment_var.set("")
+        else:
+            self.attachment_mode_var.set("none")
+            self.single_attachment_var.set("")
+            self.attachments_folder_var.set("")
+        self._update_random_attachment_count()
+
+        # Перезагрузить темы писем из текущего значения поля
+        subjects = self.subjects_file_var.get().strip()
         if subjects:
             subjects_path = self.base_dir / subjects
             if subjects_path.exists():

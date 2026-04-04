@@ -30,6 +30,7 @@ echo Собираем...
 echo.
 
 pyinstaller ^
+  --noconfirm ^
   --onedir ^
   --windowed ^
   --name "Email App" ^
@@ -37,12 +38,10 @@ pyinstaller ^
   --add-data "config;config" ^
   --add-data "files;files" ^
   --add-data "presets;presets" ^
-  --add-data "preview;preview" ^
-  --add-data "history;history" ^
-  --add-data "logs;logs" ^
   --add-data "recipients.csv;." ^
   --collect-all customtkinter ^
   --collect-all tkhtmlview ^
+  --hidden-import "socks" ^
   --hidden-import "email_app.gui" ^
   --hidden-import "email_app.modern_gui" ^
   --hidden-import "email_app.service" ^
@@ -73,10 +72,19 @@ if %errorlevel% neq 0 (
   if not exist "%DIST_DIR%\history" mkdir "%DIST_DIR%\history"
   if not exist "%DIST_DIR%\logs" mkdir "%DIST_DIR%\logs"
 
-  REM Подкладываем базовые файлы, если их не затянуло автоматически
-  if exist "config\settings.example.yaml" if not exist "%DIST_DIR%\config\settings.example.yaml" copy "config\settings.example.yaml" "%DIST_DIR%\config\settings.example.yaml" >nul
-  if exist "config\settings.yaml" if not exist "%DIST_DIR%\config\settings.yaml" copy "config\settings.yaml" "%DIST_DIR%\config\settings.yaml" >nul
-  if exist "recipients.csv" if not exist "%DIST_DIR%\recipients.csv" copy "recipients.csv" "%DIST_DIR%\recipients.csv" >nul
+  REM Кладем portable-ресурсы рядом с .exe, потому что приложение ищет их в корне dist\Email App
+  if exist "templates" xcopy "templates\*" "%DIST_DIR%\templates\" /E /I /Y >nul
+  if exist "config" xcopy "config\*" "%DIST_DIR%\config\" /E /I /Y >nul
+  if exist "files" xcopy "files\*" "%DIST_DIR%\files\" /E /I /Y >nul
+  if exist "presets" xcopy "presets\*" "%DIST_DIR%\presets\" /E /I /Y >nul
+  if exist "preview" xcopy "preview\*" "%DIST_DIR%\preview\" /E /I /Y >nul
+  if exist "history" xcopy "history\*" "%DIST_DIR%\history\" /E /I /Y >nul
+  if exist "logs" xcopy "logs\*" "%DIST_DIR%\logs\" /E /I /Y >nul
+  if exist "recipients.csv" copy /Y "recipients.csv" "%DIST_DIR%\recipients.csv" >nul
+  if exist "README.md" copy /Y "README.md" "%DIST_DIR%\README.md" >nul
+  if exist "GUIDE.md" copy /Y "GUIDE.md" "%DIST_DIR%\GUIDE.md" >nul
+  if exist "*.pdf" copy /Y "*.pdf" "%DIST_DIR%\" >nul
+  if exist "*.docx" copy /Y "*.docx" "%DIST_DIR%\" >nul
 
 echo.
 echo ============================================================
