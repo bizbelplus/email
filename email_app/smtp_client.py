@@ -96,6 +96,15 @@ class SMTPMailer:
     def __init__(self, settings: SMTPSettings) -> None:
         self.settings = settings
 
+    def _ehlo_identity(self) -> str:
+        """Returns stable EHLO identity without local host/IP disclosure."""
+        from_email = str(getattr(self.settings, "from_email", "") or "").strip().lower()
+        if "@" in from_email:
+            domain = from_email.split("@", 1)[1].strip().strip(".")
+            if domain:
+                return f"mail.{domain}"
+        return "localhost"
+
     def _build_message(
         self,
         recipient: Recipient,
@@ -109,7 +118,11 @@ class SMTPMailer:
         subject_text = str(message_settings.subject or "").strip()
         if subject_text:
             message["Subject"] = subject_text
-        message["From"] = f"{self.settings.from_name} <{self.settings.from_email}>"
+        sender_name = str(self.settings.from_name or "").strip()
+        if sender_name:
+            message["From"] = f"{sender_name} <{self.settings.from_email}>"
+        else:
+            message["From"] = self.settings.from_email
         message["To"] = recipient.email
         if message_settings.reply_to:
             message["Reply-To"] = message_settings.reply_to
@@ -196,9 +209,10 @@ class SMTPMailer:
             inline_image_paths,
         )
         with self._open() as server:
-            server.ehlo()
+            ehlo_name = self._ehlo_identity()
+            server.ehlo(ehlo_name)
             if self.settings.use_tls:
                 server.starttls(context=ssl.create_default_context())
-                server.ehlo()
+                server.ehlo(ehlo_name)
             server.login(self.settings.username, self.settings.password)
             server.send_message(message)

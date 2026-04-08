@@ -1,0 +1,47 @@
+smtp:
+  host: smtp.example.com
+  port: 587
+  username: your_login@example.com
+  password: your_password_or_app_password
+  from_email: your_login@example.com
+  from_name: Your Name
+  use_tls: true
+  use_ssl: true
+  timeout_seconds: 30
+  accounts_file: config/smtp_accounts.example.txt
+  proxy_file: config/proxies.txt
+message:
+  subject: Пример HTML-письма
+  template: ''
+  reply_to: support@example.com
+  attachments:
+  - files/example.txt
+  inline_images:
+    hero: files/example-inline.svg
+delivery:
+  delay_seconds: 0.5
+  log_file: logs/email_app.log
+  history_csv: history/email_history.csv
+  history_jsonl: history/email_history.jsonl
+  parallel_smtp_accounts: 2
+  batch_interval_seconds: 30.0
+  retry_attempts: 3
+  retry_backoff_seconds: 4.0
+content:
+  приветствие: Добро пожаловать!
+  приветствие_варианты:
+  - Добро пожаловать!
+  - Рады видеть вас!
+  - Спасибо, что вы с нами!
+  кратко: Краткое описание письма
+  вступление: Это пример безопасного SMTP-приложения на Python для легитимной рассылки
+    opt-in писем.
+  текст: Вы можете менять тему, шаблон, inline-изображения и персональные поля через
+    CSV и YAML-конфиг.
+  кнопка: Открыть сайт
+  ссылка_кнопки: https://example.com
+  подпись: Команда поддержки
+  подпись_варианты:
+  - Команда поддержки
+  - Ваш персональный менеджер
+  - С уважением, команда проекта

@@ -7,6 +7,7 @@ import random
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from tkinter import ttk
@@ -87,6 +88,8 @@ class ModernEmailAppGUI:
         self.subjects_file_var = ctk.StringVar(value="config/subjects.txt")
         self._subjects_list: list[str] = []
         self.subjects_mode_var = ctk.StringVar(value="manual")  # manual | file_fixed | file_random
+        self.sender_names_file_var = ctk.StringVar(value="")
+        self.sender_names_mode_var = ctk.StringVar(value="random")  # random | sequential
         self.subject_manual_var = ctk.StringVar(value="")
         self.subject_pick_var = ctk.StringVar(value="")
         self.external_editor_path = ctk.StringVar(value="")
@@ -95,6 +98,7 @@ class ModernEmailAppGUI:
         self.preview_recipient_var = ctk.StringVar(value="")
         self.mobile_preview_var = ctk.BooleanVar(value=False)
         self.replyto_mode_var = ctk.StringVar(value="random")
+        self.disable_replyto_var = ctk.BooleanVar(value=False)
         self.replyto_count_var = ctk.StringVar(value="0")
         self.delay_var = ctk.StringVar(value="0")
         self.rate_limit_var = ctk.StringVar(value="")
@@ -106,6 +110,9 @@ class ModernEmailAppGUI:
         self.dry_run_var = ctk.BooleanVar(value=True)
         self.status_var = ctk.StringVar(value="✓ Готово к запуску")
         self.editor_live_job = None
+        self._source_status_refresh_job = None
+        self._source_watch_signature: tuple[object, ...] | None = None
+        self._last_source_poll_at = 0.0
         # Отслеживание прогресса кампании
         self._stop_event: threading.Event = threading.Event()
         self._pause_event: threading.Event = threading.Event()
@@ -119,15 +126,24 @@ class ModernEmailAppGUI:
         self._build()
         self._setup_mousewheel_scrolling()
         self._on_theme_change(self.theme_var.get())
+        self.recipients_var.trace_add("write", lambda *_: self._schedule_source_status_refresh())
+        self.smtp_accounts_file_var.trace_add("write", lambda *_: self._schedule_source_status_refresh())
+        self.proxy_file_var.trace_add("write", lambda *_: self._schedule_source_status_refresh())
+        self.sender_names_file_var.trace_add("write", lambda *_: self._schedule_source_status_refresh())
         self.proxy_type_var.trace_add("write", lambda *_: self._sync_proxy_defaults_to_config())
         self.proxy_auth_user_var.trace_add("write", lambda *_: self._sync_proxy_defaults_to_config())
         self.proxy_auth_pass_var.trace_add("write", lambda *_: self._sync_proxy_defaults_to_config())
+        self.proxy_type_var.trace_add("write", lambda *_: self._schedule_source_status_refresh())
+        self.proxy_auth_user_var.trace_add("write", lambda *_: self._schedule_source_status_refresh())
+        self.proxy_auth_pass_var.trace_add("write", lambda *_: self._schedule_source_status_refresh())
         self._load_last_session()
         self._load_proxy_and_attachments_from_config()
         if self.current_preset_path:
             self._load_preset(self.current_preset_path, silent=True)
             self._load_proxy_and_attachments_from_config()
         self._refresh_templates()
+        self._verify_recipients_source(strict=False)
+        self._refresh_source_statuses()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(150, self._poll_queue)
 
@@ -223,7 +239,28 @@ class ModernEmailAppGUI:
             font=("", 10),
             text_color=("gray40", "gray60"),
         ).pack(anchor="w", padx=14, pady=(0, 4))
-        self._add_path_row(config_section, 4, "Темы писем", self.subjects_file_var, self._select_subjects_file)
+        self.smtp_accounts_count_label = self.ctk.CTkLabel(
+            config_section,
+            text="",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        )
+        self.smtp_accounts_count_label.pack(anchor="w", padx=14, pady=(0, 4))
+        self._add_path_row(config_section, 4, "Имена отправителей", self.sender_names_file_var, self._select_sender_names_file)
+        self.ctk.CTkLabel(
+            config_section,
+            text="Подсказка: TXT, одно имя в строке; подставляется в поле «От кого» при отправке.",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        ).pack(anchor="w", padx=14, pady=(0, 2))
+        _sn_mode_row = self.ctk.CTkFrame(config_section, fg_color="transparent")
+        _sn_mode_row.pack(fill="x", padx=14, pady=(0, 4))
+        self.ctk.CTkLabel(_sn_mode_row, text="Режим имён:").pack(side="left", padx=(0, 8))
+        self.ctk.CTkRadioButton(_sn_mode_row, text="Случайное", variable=self.sender_names_mode_var, value="random").pack(side="left", padx=(0, 12))
+        self.ctk.CTkRadioButton(_sn_mode_row, text="По порядку", variable=self.sender_names_mode_var, value="sequential").pack(side="left")
+        self.sender_names_count_label = self.ctk.CTkLabel(config_section, text="", font=("", 10), text_color=("gray40", "gray60"))
+        self.sender_names_count_label.pack(anchor="w", padx=14, pady=(0, 4))
+        self._add_path_row(config_section, 5, "Темы писем", self.subjects_file_var, self._select_subjects_file)
         self.ctk.CTkLabel(
             config_section,
             text="Подсказка: TXT, одна тема в строке; по умолчанию используется config/subjects.txt.",
@@ -268,6 +305,13 @@ class ModernEmailAppGUI:
             font=("", 10),
             text_color=("gray40", "gray60"),
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.ctk.CTkCheckBox(
+            replyto_section,
+            text="Отправлять без Reply-To (игнорировать поле и файл replyto_emails.txt)",
+            variable=self.disable_replyto_var,
+            onvalue=True,
+            offvalue=False,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         replyto_mode_section = self.ctk.CTkFrame(config_section, fg_color="transparent")
         replyto_mode_section.pack(fill="x", padx=12, pady=(0,8))
@@ -325,6 +369,13 @@ class ModernEmailAppGUI:
             font=("", 10),
             text_color=("gray40", "gray60"),
         ).pack(anchor="w", pady=(2, 0))
+        self.proxy_count_label = self.ctk.CTkLabel(
+            proxy_section,
+            text="",
+            font=("", 10),
+            text_color=("gray40", "gray60"),
+        )
+        self.proxy_count_label.pack(anchor="w", pady=(4, 0))
 
         self._on_subject_mode_change()
 
@@ -1168,6 +1219,42 @@ class ModernEmailAppGUI:
             f"{smtp_accounts_file}",
         )
 
+    def _verify_recipients_source(self, strict: bool) -> bool:
+        """Verifies that selected recipients source is sane and visible to user."""
+        text = self.recipients_var.get().strip()
+        if not text:
+            fallback = self.base_dir / "recipients.csv"
+            if fallback.exists():
+                self.recipients_var.set("recipients.csv")
+                self._append_log("ℹ️ Получатели не были выбраны, установлен файл по умолчанию: recipients.csv")
+            return True
+
+        resolved = self._resolve_ui_path(text)
+        self._append_log(f"📥 Источник получателей: {resolved}")
+
+        if not resolved.exists():
+            if strict:
+                messagebox.showerror("Получатели", f"Файл получателей не найден:\n{resolved}")
+                return False
+            return True
+
+        suspicious_name = resolved.as_posix().lower().endswith("config/emails.txt")
+        fallback = self.base_dir / "recipients.csv"
+        if suspicious_name and fallback.exists():
+            if strict:
+                switch = messagebox.askyesno(
+                    "Получатели",
+                    "Сейчас выбран файл config/emails.txt (часто это не основной список получателей).\n\n"
+                    "Переключить на recipients.csv?",
+                )
+                if switch:
+                    self.recipients_var.set("recipients.csv")
+                    self._append_log("🔁 Получатели переключены на recipients.csv")
+            else:
+                self._append_log("⚠️ Внимание: выбран config/emails.txt как источник получателей")
+
+        return True
+
     def _select_recipients(self) -> None:
         path = filedialog.askopenfilename(
             initialdir=self.base_dir,
@@ -1420,15 +1507,68 @@ class ModernEmailAppGUI:
         self.subjects_file_var.set(relative_path)
         self._load_subjects_file(Path(path))
 
+    def _select_sender_names_file(self) -> None:
+        path = filedialog.askopenfilename(
+            initialdir=self.base_dir,
+            filetypes=[("TXT", "*.txt"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+        relative_path = self._relative(Path(path))
+        self.sender_names_file_var.set(relative_path)
+        self._update_sender_names_count_label()
+
+    def _load_sender_names(self) -> list[str]:
+        """Читает файл имён отправителей, возвращает список непустых строк."""
+        rel = self.sender_names_file_var.get().strip()
+        if not rel:
+            return []
+        p = self._resolve_ui_path(rel)
+        if not p.exists():
+            return []
+        try:
+            lines, _ = self._read_text_lines_with_fallback(p)
+            return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+        except Exception:
+            return []
+
+    def _update_sender_names_count_label(self) -> None:
+        names = self._load_sender_names()
+        if names:
+            self.sender_names_count_label.configure(text=f"Имён отправителей: {len(names)}")
+        else:
+            rel = self.sender_names_file_var.get().strip()
+            if rel:
+                self.sender_names_count_label.configure(text="⚠️ Файл имён не найден или пуст")
+            else:
+                self.sender_names_count_label.configure(text="")
+
+    def _read_text_lines_with_fallback(self, path: Path) -> tuple[list[str], str]:
+        encodings = ("utf-8-sig", "utf-8", "cp1251", "cp866", "koi8-r")
+        last_error: Exception | None = None
+        for enc in encodings:
+            try:
+                with path.open("r", encoding=enc) as handle:
+                    return handle.readlines(), enc
+            except UnicodeDecodeError as error:
+                last_error = error
+                continue
+            except Exception as error:  # noqa: BLE001
+                last_error = error
+                break
+        if last_error is None:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "unknown decode error")
+        raise last_error
+
     def _load_subjects_file(self, path: Path) -> None:
         """Загружает список тем из TXT-файла (одна тема — одна строка)."""
         subjects: list[str] = []
         try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    s = line.strip()
-                    if s and not s.startswith("#"):
-                        subjects.append(s)
+            lines, used_encoding = self._read_text_lines_with_fallback(path)
+            for line in lines:
+                s = line.strip()
+                if s and not s.startswith("#"):
+                    subjects.append(s)
         except Exception as error:  # noqa: BLE001
             messagebox.showerror("Темы", f"Не удалось загрузить файл тем: {error}")
             return
@@ -1441,7 +1581,7 @@ class ModernEmailAppGUI:
         else:
             self.subject_pick_var.set("")
         self._subjects_count_label.configure(text=f"Тем загружено: {len(subjects)}")
-        self._append_log(f"Загружено тем: {len(subjects)} из {self.subjects_file_var.get()}")
+        self._append_log(f"Загружено тем: {len(subjects)} из {self.subjects_file_var.get()} (encoding={used_encoding})")
 
     def _on_subject_mode_change(self) -> None:
         mode = (self.subjects_mode_var.get() or "manual").strip()
@@ -2064,6 +2204,10 @@ class ModernEmailAppGUI:
             messagebox.showerror("Email App Modern", "Выберите тему из списка или переключитесь на 'Написать вручную'.")
             return
 
+        if not self._verify_recipients_source(strict=True):
+            self.status_var.set("⊘ Отправка отменена")
+            return
+
         try:
             preflight = run_preflight(
                 base_dir=self.base_dir,
@@ -2098,22 +2242,27 @@ class ModernEmailAppGUI:
                 self.status_var.set("⊘ Отправка отменена")
                 return
 
-        # Рандомный выбор Reply-To
-        reply_to_random = self._pick_random_replyto()
-        if not reply_to_random:
-            proceed_without_reply_to = messagebox.askyesno(
-                "Reply-To",
-                "Не выбран ни один email для Reply-To.\n\n"
-                "Отправить письма без Reply-To?",
-            )
-            if not proceed_without_reply_to:
-                self.status_var.set("⊘ Отправка отменена")
-                return
-            self._append_log("⚠️ Reply-To не указан: отправка будет выполнена без Reply-To")
+        if self.disable_replyto_var.get():
             reply_to_random = ""
-        self.replyto_var.set(reply_to_random)
-
-        mode_label = "фиксированный" if self.replyto_mode_var.get() == "fixed" else "случайный"
+            self.replyto_var.set("")
+            mode_label = "без Reply-To"
+            self._append_log("ℹ️ Включен режим отправки без Reply-To")
+        else:
+            # Рандомный выбор Reply-To
+            reply_to_random = self._pick_random_replyto()
+            if not reply_to_random:
+                proceed_without_reply_to = messagebox.askyesno(
+                    "Reply-To",
+                    "Не выбран ни один email для Reply-To.\n\n"
+                    "Отправить письма без Reply-To?",
+                )
+                if not proceed_without_reply_to:
+                    self.status_var.set("⊘ Отправка отменена")
+                    return
+                self._append_log("⚠️ Reply-To не указан: отправка будет выполнена без Reply-To")
+                reply_to_random = ""
+            self.replyto_var.set(reply_to_random)
+            mode_label = "фиксированный" if self.replyto_mode_var.get() == "fixed" else "случайный"
         # Сброс состояния прогресса
         self._stop_event.clear()
         self._pause_event.clear()
@@ -2250,11 +2399,14 @@ class ModernEmailAppGUI:
                 parallel_smtp_accounts=config.delivery.parallel_smtp_accounts,
                 batch_interval_seconds=config.delivery.batch_interval_seconds,
                 reply_to_override=self.replyto_var.get().strip() or None,
-                reply_to_mode_override=self.replyto_mode_var.get().strip() or None,
+                reply_to_mode_override=("none" if self.disable_replyto_var.get() else (self.replyto_mode_var.get().strip() or None)),
+                force_no_reply_to=self.disable_replyto_var.get(),
                 stop_event=self._stop_event,
                 pause_event=self._pause_event,
                 runtime_overrides_getter=self._build_runtime_overrides_getter(),
                 progress_callback=self._make_progress_callback(),
+                 sender_names=self._load_sender_names(),
+                 sender_names_mode=self.sender_names_mode_var.get() or "random",
             )
             self.queue.put(("log", f"История CSV: {summary.history_csv}"))
             self.queue.put(("log", f"История JSONL: {summary.history_jsonl}"))
@@ -2281,11 +2433,11 @@ class ModernEmailAppGUI:
             if not path.exists():
                 return items
             try:
-                with path.open("r", encoding="utf-8") as handle:
-                    for line in handle:
-                        text = line.strip()
-                        if text and not text.startswith("#"):
-                            items.append(text)
+                lines, _enc = self._read_text_lines_with_fallback(path)
+                for line in lines:
+                    text = line.strip()
+                    if text and not text.startswith("#"):
+                        items.append(text)
             except Exception:
                 return []
             return items
@@ -2766,6 +2918,7 @@ class ModernEmailAppGUI:
                 self.pause_btn.configure(text="⏸ Пауза", fg_color=("#b9770e", "#7e5109"))
                 messagebox.showerror("✗ Ошибка", payload)
 
+        self._poll_source_files()
         self.root.after(150, self._poll_queue)
 
     def _append_log(self, message: str) -> None:
@@ -2774,6 +2927,223 @@ class ModernEmailAppGUI:
 
     def _clear_log(self) -> None:
         self.log_widget.delete("1.0", "end")
+
+    def _resolve_ui_path(self, value: str) -> Path:
+        text = str(value).strip()
+        path = Path(text)
+        if path.is_absolute():
+            return path
+        return self.base_dir / path
+
+    def _source_signature_for_value(self, value: str) -> tuple[str, int | None, int | None]:
+        text = str(value).strip()
+        if not text:
+            return ("", None, None)
+        path = self._resolve_ui_path(text)
+        try:
+            stat = path.stat()
+            return (str(path), stat.st_mtime_ns, stat.st_size)
+        except Exception:
+            return (str(path), None, None)
+
+    def _build_source_watch_signature(self) -> tuple[object, ...]:
+        return (
+            self._source_signature_for_value(self.recipients_var.get()),
+            self._source_signature_for_value(self.smtp_accounts_file_var.get()),
+            self._source_signature_for_value(self.proxy_file_var.get()),
+            str(self.proxy_type_var.get()).strip().lower(),
+            str(self.proxy_auth_user_var.get()).strip(),
+            str(self.proxy_auth_pass_var.get()).strip(),
+        )
+
+    def _schedule_source_status_refresh(self, delay_ms: int = 200) -> None:
+        if self._source_status_refresh_job:
+            self.root.after_cancel(self._source_status_refresh_job)
+        self._source_status_refresh_job = self.root.after(delay_ms, self._refresh_source_statuses)
+
+    def _refresh_source_statuses(self) -> None:
+        self._source_status_refresh_job = None
+        self._update_recipients_source_info()
+        self._update_smtp_source_info()
+        self._update_proxy_source_info()
+        self._source_watch_signature = self._build_source_watch_signature()
+        self._update_sender_names_count_label()
+
+    def _poll_source_files(self) -> None:
+        now = time.monotonic()
+        if now - self._last_source_poll_at < 1.0:
+            return
+        self._last_source_poll_at = now
+        signature = self._build_source_watch_signature()
+        if signature != self._source_watch_signature:
+            self._refresh_source_statuses()
+
+    def _update_recipients_source_info(self) -> None:
+        preview_combo = getattr(self, "preview_recipient_combo", None)
+
+        text = self.recipients_var.get().strip()
+        if not text:
+            self.recipients_count_label.configure(text="Получатели: файл не выбран")
+            if preview_combo is not None:
+                preview_combo.configure(values=[])
+            self.preview_recipient_var.set("")
+            self._recipients_count = 0
+            self._update_eta_estimate()
+            return
+
+        path = self._resolve_ui_path(text)
+        if not path.exists():
+            self.recipients_count_label.configure(text=f"⚠️ Получатели: файл не найден ({text})")
+            if preview_combo is not None:
+                preview_combo.configure(values=[])
+            self.preview_recipient_var.set("")
+            self._recipients_count = 0
+            self._update_eta_estimate()
+            return
+
+        try:
+            recipients = load_recipients(path)
+        except RecipientsError:
+            self.recipients_count_label.configure(text="⚠️ Получатели: файл не распознан")
+            if preview_combo is not None:
+                preview_combo.configure(values=[])
+            self.preview_recipient_var.set("")
+            self._recipients_count = 0
+            self._update_eta_estimate()
+            return
+
+        values = [recipient.email for recipient in recipients]
+        if preview_combo is not None:
+            preview_combo.configure(values=values)
+        if values:
+            current = self.preview_recipient_var.get().strip()
+            if current not in values:
+                self.preview_recipient_var.set(values[0])
+
+        self._recipients_count = len(recipients)
+        self._update_eta_estimate()
+
+        if path.suffix.lower() == ".txt":
+            self.recipients_count_label.configure(text=f"👥 Получателей: {len(recipients)} | имён: нет | доп. полей: нет (TXT: только email)")
+            return
+
+        def _norm_key(value: str) -> str:
+            text = str(value).strip().lower().replace("\u00a0", " ")
+            confusables = {
+                "а": "a",
+                "е": "e",
+                "о": "o",
+                "р": "p",
+                "с": "c",
+                "у": "y",
+                "х": "x",
+                "к": "k",
+                "м": "m",
+                "т": "t",
+                "в": "b",
+                "і": "i",
+            }
+            return "".join(confusables.get(ch, ch) for ch in text)
+
+        # Use already parsed recipients data, so display does not depend on a second UTF-8-only read.
+        ordered_fields: list[str] = []
+        seen_norm_fields: set[str] = set()
+        for recipient in recipients[:500]:
+            for raw_key in recipient.data.keys():
+                key = str(raw_key).strip()
+                if not key:
+                    continue
+                low = key.lower()
+                norm = _norm_key(key)
+                if low in {"email", "mail", "e-mail", "почта"} or norm in {"email", "mail", "e-mail", "почта"}:
+                    continue
+                if norm in seen_norm_fields:
+                    continue
+                seen_norm_fields.add(norm)
+                ordered_fields.append(key)
+
+        extra_fields = ordered_fields
+        name_candidates = {"name", "имя", "full_name", "fullname", "first_name", "firstname"}
+        has_names = False
+        for recipient in recipients[:500]:
+            for raw_key, raw_value in recipient.data.items():
+                raw_low = str(raw_key).strip().lower()
+                norm_low = _norm_key(raw_key)
+                if (raw_low in name_candidates or norm_low in name_candidates) and str(raw_value or "").strip():
+                    has_names = True
+                    break
+            if has_names:
+                break
+
+        shown_fields = ", ".join(extra_fields[:6]) if extra_fields else "нет"
+        if len(extra_fields) > 6:
+            shown_fields += f" и ещё {len(extra_fields) - 6}"
+        self.recipients_count_label.configure(
+            text=f"👥 Получателей: {len(recipients)} | имена: {'есть' if has_names else 'нет'} | доп. поля: {shown_fields}"
+        )
+
+    def _update_smtp_source_info(self) -> None:
+        from .config import _load_smtp_accounts
+
+        text = self.smtp_accounts_file_var.get().strip()
+        if not text:
+            self.smtp_accounts_count_label.configure(text="SMTP аккаунты: не выбран отдельный файл")
+            return
+
+        path = self._resolve_ui_path(text)
+        if not path.exists():
+            self.smtp_accounts_count_label.configure(text=f"⚠️ SMTP аккаунты: файл не найден ({text})")
+            return
+
+        if self._looks_like_smtp_domains_file(path):
+            self.smtp_accounts_count_label.configure(text="⚠️ SMTP аккаунты: выбран smtp_domains.txt, а не файл аккаунтов")
+            return
+
+        try:
+            accounts = _load_smtp_accounts(path)
+        except Exception as error:  # noqa: BLE001
+            self.smtp_accounts_count_label.configure(text=f"⚠️ SMTP аккаунты: ошибка чтения файла ({error})")
+            return
+
+        with_names = sum(1 for account in accounts if str(getattr(account, 'from_name', '') or '').strip())
+        domains = sorted({str(getattr(account, 'host', '') or '').strip() for account in accounts if str(getattr(account, 'host', '') or '').strip()})
+        shown_domains = ", ".join(domains[:3]) if domains else "не определены"
+        if len(domains) > 3:
+            shown_domains += f" и ещё {len(domains) - 3}"
+        self.smtp_accounts_count_label.configure(
+            text=f"SMTP аккаунтов: {len(accounts)} | имена From: {with_names}/{len(accounts)} | хосты: {shown_domains}"
+        )
+
+    def _update_proxy_source_info(self) -> None:
+        from .proxy_utils import load_proxies
+
+        text = self.proxy_file_var.get().strip()
+        if not text:
+            self.proxy_count_label.configure(text="Прокси: файл не выбран")
+            return
+
+        path = self._resolve_ui_path(text)
+        if not path.exists():
+            self.proxy_count_label.configure(text=f"⚠️ Прокси: файл не найден ({text})")
+            return
+
+        try:
+            proxies = load_proxies(
+                path,
+                default_proxy_type=str(self.proxy_type_var.get() or 'socks5').strip().lower() or 'socks5',
+                default_proxy_user=str(self.proxy_auth_user_var.get() or '').strip() or None,
+                default_proxy_pass=str(self.proxy_auth_pass_var.get() or '').strip() or None,
+            )
+        except Exception as error:  # noqa: BLE001
+            self.proxy_count_label.configure(text=f"⚠️ Прокси: ошибка чтения файла ({error})")
+            return
+
+        types = sorted({str(proxy.get('proxy_type') or '').strip().lower() for proxy in proxies if str(proxy.get('proxy_type') or '').strip()})
+        auth_count = sum(1 for proxy in proxies if proxy.get('proxy_user'))
+        shown_types = ", ".join(types) if types else "нет"
+        self.proxy_count_label.configure(
+            text=f"Прокси: {len(proxies)} | типы: {shown_types} | с авторизацией: {auth_count}"
+        )
 
     def _relative(self, path: Path) -> str:
         try:
@@ -2826,17 +3196,22 @@ class ModernEmailAppGUI:
         if not file_path:
             return
         emails = []
-        with open(file_path, encoding="utf-8") as f:
-            for line in f:
-                email = line.strip()
-                if email and "@" in email:
-                    emails.append(email)
+        try:
+            lines, used_encoding = self._read_text_lines_with_fallback(Path(file_path))
+        except Exception as error:  # noqa: BLE001
+            messagebox.showerror("Reply-To", f"Не удалось прочитать файл: {error}")
+            return
+        for line in lines:
+            email = line.strip()
+            if email and "@" in email:
+                emails.append(email)
         if not emails:
             messagebox.showerror("Reply-To", "В файле нет ни одного email!")
             return
         self.replyto_combo.configure(values=emails)
         self.replyto_var.set(emails[0])
         self.replyto_count_var.set(f"Reply-To адресов: {len(emails)}")
+        self._append_log(f"Reply-To загружены: {len(emails)} (encoding={used_encoding})")
 
     def _pick_random_replyto(self) -> str:
         current_values = list(self.replyto_combo.cget("values"))
@@ -2866,11 +3241,15 @@ class ModernEmailAppGUI:
         try:
             recipients = load_recipients(self.base_dir / self.recipients_var.get())
         except RecipientsError:
-            self.preview_recipient_combo.configure(values=[])
+            preview_combo = getattr(self, "preview_recipient_combo", None)
+            if preview_combo is not None:
+                preview_combo.configure(values=[])
             self.preview_recipient_var.set("")
             return
         values = [recipient.email for recipient in recipients]
-        self.preview_recipient_combo.configure(values=values)
+        preview_combo = getattr(self, "preview_recipient_combo", None)
+        if preview_combo is not None:
+            preview_combo.configure(values=values)
         if values:
             self.preview_recipient_var.set(values[0])
 
@@ -3073,16 +3452,12 @@ class ModernEmailAppGUI:
         self.ctk.CTkButton(btn_row, text="✕ Закрыть", width=100, fg_color=("gray70", "gray35"), command=win.destroy).pack(side="right")
 
     def _update_recipients_count(self, path: Path) -> None:
-        """Пересчитывает получателей и обновляет метку + ETA."""
+        """Совместимость: обновляет детальную информацию по источнику получателей."""
         try:
-            recs = load_recipients(path)
-            count = len(recs)
-            self._recipients_count = count
-            self.recipients_count_label.configure(text=f"👥 Получателей: {count}")
-        except RecipientsError:
-            self.recipients_count_label.configure(text="⚠️ Файл не распознан")
-            self._recipients_count = 0
-        self._update_eta_estimate()
+            self.recipients_var.set(self._relative(path))
+        except Exception:
+            pass
+        self._update_recipients_source_info()
 
     def _update_eta_estimate(self) -> None:
         """Обновляет оценочное время завершения рядом с числом получателей."""
@@ -3176,6 +3551,120 @@ class ModernEmailAppGUI:
                     mapping["use_ssl"] = guessed.get("use_ssl", False)
         return [_build_smtp_settings(mapping)]
 
+    def _resolve_smtp_accounts_file_from_config(self) -> Path | None:
+        config_path = self.base_dir / self.config_var.get()
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            return None
+        smtp_raw = raw.get("smtp") or {}
+        acf_value = str(smtp_raw.get("accounts_file") or "").strip()
+        if not acf_value:
+            return None
+        return (self.base_dir / acf_value).resolve()
+
+    def _rewrite_smtp_accounts_file(self, accounts_file: Path, valid_accounts: list[object], total_accounts: int) -> tuple[int, int]:
+        import csv
+
+        kept = len(valid_accounts)
+        removed = max(0, total_accounts - kept)
+
+        if kept == 0:
+            confirmed = messagebox.askyesno(
+                "Очистка SMTP",
+                "После фильтрации не осталось валидных SMTP-аккаунтов.\n"
+                "Перезаписать файл пустым списком?",
+            )
+            if not confirmed:
+                return (0, 0)
+
+        if accounts_file.suffix.lower() == ".csv":
+            fieldnames = [
+                "host",
+                "port",
+                "username",
+                "password",
+                "from_email",
+                "from_name",
+                "use_tls",
+                "use_ssl",
+                "timeout_seconds",
+            ]
+            with accounts_file.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                for smtp in valid_accounts:
+                    writer.writerow(
+                        {
+                            "host": smtp.host,
+                            "port": smtp.port,
+                            "username": smtp.username,
+                            "password": smtp.password,
+                            "from_email": smtp.from_email,
+                            "from_name": smtp.from_name,
+                            "use_tls": bool(smtp.use_tls),
+                            "use_ssl": bool(smtp.use_ssl),
+                            "timeout_seconds": int(smtp.timeout_seconds),
+                        }
+                    )
+        else:
+            lines: list[str] = []
+            for smtp in valid_accounts:
+                lines.append(
+                    "|".join(
+                        [
+                            str(smtp.host),
+                            str(smtp.port),
+                            str(smtp.username),
+                            str(smtp.password),
+                            str(smtp.from_email),
+                            str(smtp.from_name),
+                            "true" if bool(smtp.use_tls) else "false",
+                            "true" if bool(smtp.use_ssl) else "false",
+                            str(int(smtp.timeout_seconds)),
+                        ]
+                    )
+                )
+            text = "\n".join(lines)
+            if text:
+                text += "\n"
+            accounts_file.write_text(text, encoding="utf-8-sig")
+
+        return (kept, removed)
+
+    def _rewrite_proxy_file(self, proxy_file: Path, valid_proxies: list[dict], total_proxies: int) -> tuple[int, int]:
+        kept = len(valid_proxies)
+        removed = max(0, total_proxies - kept)
+
+        if kept == 0:
+            confirmed = messagebox.askyesno(
+                "Очистка прокси",
+                "После фильтрации не осталось валидных прокси.\n"
+                "Перезаписать файл пустым списком?",
+            )
+            if not confirmed:
+                return (0, 0)
+
+        lines: list[str] = []
+        for proxy in valid_proxies:
+            host = str(proxy.get("proxy_host") or "").strip()
+            port = str(proxy.get("proxy_port") or "").strip()
+            ptype = str(proxy.get("proxy_type") or "socks5").strip().lower()
+            p_user = str(proxy.get("proxy_user") or "").strip()
+            p_pass = str(proxy.get("proxy_pass") or "").strip()
+            if not host or not port:
+                continue
+            if p_user and p_pass:
+                lines.append(f"{host}:{port}:{ptype}:{p_user}:{p_pass}")
+            else:
+                lines.append(f"{host}:{port}:{ptype}")
+
+        text = "\n".join(lines)
+        if text:
+            text += "\n"
+        proxy_file.write_text(text, encoding="utf-8-sig")
+        return (kept, removed)
+
     def _test_all_smtp_accounts(self) -> None:
         """Тестирует авторизацию всех SMTP-аккаунтов из пакета."""
         import smtplib
@@ -3187,6 +3676,16 @@ class ModernEmailAppGUI:
             low = raw.lower()
             if "authentication" in low or "535" in low or "username and password not accepted" in low:
                 return "Ошибка авторизации SMTP (неверный логин/пароль или app-password)"
+            if "account has been disabled" in low or "account disabled" in low or "this account does not exist" in low:
+                return "Аккаунт отключён или удалён Google (вход прошёл, отправка заблокирована)"
+            if "daily user sending quota exceeded" in low or "daily sending quota" in low or "too many messages" in low:
+                return "Превышен суточный лимит отправки Gmail"
+            if "suspended" in low and "mail" in low:
+                return "Аккаунт заблокирован Google за нарушение правил"
+            if "5.7.0" in low and "disabled" in low:
+                return "Аккаунт отключён Google (5.7.0)"
+            if "sender denied" in low or ("sender" in low and "refused" in low):
+                return "Отправка отклонена сервером (аккаунт не может отправлять)"
             if "timed out" in low or "timeout" in low:
                 return "Таймаут соединения"
             if "connection refused" in low:
@@ -3213,6 +3712,14 @@ class ModernEmailAppGUI:
         win.grab_set()
 
         self.ctk.CTkLabel(win, text=f"Аккаунтов для теста: {len(accounts)}", font=("", 12, "bold")).pack(anchor="w", padx=12, pady=(12, 6))
+        auto_clean_smtp_var = self.ctk.BooleanVar(value=False)
+        self.ctk.CTkCheckBox(
+            win,
+            text="Удалять из файла SMTP аккаунты, не прошедшие тест",
+            variable=auto_clean_smtp_var,
+            onvalue=True,
+            offvalue=False,
+        ).pack(anchor="w", padx=12, pady=(0, 6))
         result_text = self.ctk.CTkTextbox(win, wrap="word")
         result_text.pack(fill="both", expand=True, padx=12, pady=8)
 
@@ -3223,6 +3730,7 @@ class ModernEmailAppGUI:
         def run_all(emit: callable) -> None:
             ok = 0
             bad = 0
+            valid_accounts: list[object] = []
             emit("Старт теста SMTP...")
             emit("")
             for idx, smtp in enumerate(accounts, start=1):
@@ -3233,14 +3741,42 @@ class ModernEmailAppGUI:
                         conn = smtplib.SMTP_SSL(smtp.host, smtp.port, timeout=smtp.timeout_seconds)
                     else:
                         conn = smtplib.SMTP(smtp.host, smtp.port, timeout=smtp.timeout_seconds)
+                        ehlo_name = "localhost"
+                        from_email = str(getattr(smtp, "from_email", "") or "").strip().lower()
+                        if "@" in from_email:
+                            _domain = from_email.split("@", 1)[1].strip().strip(".")
+                            if _domain:
+                                ehlo_name = f"mail.{_domain}"
                         if smtp.use_tls:
-                            conn.ehlo()
+                            conn.ehlo(ehlo_name)
                             conn.starttls()
-                            conn.ehlo()
+                            conn.ehlo(ehlo_name)
                     conn.login(smtp.username, smtp.password)
-                    conn.quit()
-                    ok += 1
-                    emit("  ✅ OK")
+                    # Дополнительная проверка: может ли аккаунт реально отправлять
+                    # (MAIL FROM), а не только авторизоваться. Google иногда принимает
+                    # AUTH (235), но блокирует отправку для отключённых аккаунтов.
+                    _mail_code, _mail_msg = conn.mail(smtp.username)
+                    if _mail_code == 250:
+                        try:
+                            conn.rset()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        conn.quit()
+                        ok += 1
+                        valid_accounts.append(smtp)
+                        emit("  ✅ OK (авторизация + отправка ✓)")
+                    else:
+                        _resp_str = _mail_msg.decode(errors="replace") if isinstance(_mail_msg, bytes) else str(_mail_msg)
+                        try:
+                            conn.quit()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        bad += 1
+                        emit(f"  ❌ ОТПРАВКА ЗАБЛОКИРОВАНА ({_mail_code}): {_humanize_error_ru(_resp_str)}")
+                except smtplib.SMTPSenderRefused as exc:
+                    bad += 1
+                    _resp = exc.smtp_error.decode(errors="replace") if isinstance(exc.smtp_error, bytes) else str(exc.smtp_error)
+                    emit(f"  ❌ ОТПРАВКА ЗАБЛОКИРОВАНА ({exc.smtp_code}): {_humanize_error_ru(_resp)}")
                 except smtplib.SMTPAuthenticationError as exc:
                     bad += 1
                     emit(f"  ❌ AUTH: {_humanize_error_ru(exc)}")
@@ -3253,6 +3789,23 @@ class ModernEmailAppGUI:
 
             emit("")
             emit(f"Итог: ✅ {ok} | ❌ {bad}")
+            if auto_clean_smtp_var.get():
+                accounts_file = self._resolve_smtp_accounts_file_from_config()
+                if not accounts_file:
+                    emit("⚠️ Автоочистка SMTP: accounts_file не задан в конфиге, пропущено")
+                    return
+                if not accounts_file.exists():
+                    emit(f"⚠️ Автоочистка SMTP: файл не найден: {accounts_file}")
+                    return
+                try:
+                    kept, removed = self._rewrite_smtp_accounts_file(accounts_file, valid_accounts, len(accounts))
+                    if kept == 0 and removed == 0 and len(valid_accounts) == 0:
+                        emit("ℹ️ Автоочистка SMTP отменена пользователем")
+                        return
+                    emit(f"🧹 SMTP файл обновлён: оставлено {kept}, удалено {removed}")
+                    self._append_log(f"Автоочистка SMTP: {accounts_file} | оставлено={kept}, удалено={removed}")
+                except Exception as error:  # noqa: BLE001
+                    emit(f"❌ Ошибка автоочистки SMTP: {error}")
 
         q: _queue.Queue[tuple[str, object]] = _queue.Queue()
         state = {"running": False}
@@ -3301,6 +3854,7 @@ class ModernEmailAppGUI:
     def _test_proxies(self) -> None:
         """Тест прокси: доступность proxy host:port и туннель до SMTP через прокси."""
         import socket
+        import re
         import queue as _queue
         try:
             import socks  # type: ignore
@@ -3351,6 +3905,14 @@ class ModernEmailAppGUI:
         win.grab_set()
 
         self.ctk.CTkLabel(win, text=f"Прокси для теста: {len(proxies)}", font=("", 12, "bold")).pack(anchor="w", padx=12, pady=(12, 6))
+        auto_clean_proxy_var = self.ctk.BooleanVar(value=False)
+        self.ctk.CTkCheckBox(
+            win,
+            text="Удалять из файла прокси, не прошедшие тест",
+            variable=auto_clean_proxy_var,
+            onvalue=True,
+            offvalue=False,
+        ).pack(anchor="w", padx=12, pady=(0, 6))
         result_text = self.ctk.CTkTextbox(win, wrap="word")
         result_text.pack(fill="both", expand=True, padx=12, pady=8)
 
@@ -3377,7 +3939,117 @@ class ModernEmailAppGUI:
             ok = 0
             bad = 0
             smtp_ready = 0
+            valid_proxies: list[dict] = []
+
+            def _extract_public_ip(raw_http: str) -> str | None:
+                body = raw_http.split("\r\n\r\n", 1)[-1].strip()
+                m = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", body)
+                return m.group(0) if m else None
+
+            ip_endpoints: list[tuple[str, int, str, bool]] = [
+                ("api.ipify.org", 80, "/?format=text", False),
+                ("ifconfig.me", 80, "/ip", False),
+                ("ipv4.icanhazip.com", 80, "/", False),
+                ("api.ipify.org", 443, "/?format=text", True),
+                ("ifconfig.me", 443, "/ip", True),
+            ]
+
+            def _read_ip_response(sock: object, host: str, path: str, timeout: int, use_tls: bool) -> tuple[str | None, str | None]:
+                import ssl
+
+                req = (
+                    f"GET {path} HTTP/1.1\r\n"
+                    f"Host: {host}\r\n"
+                    "Connection: close\r\n"
+                    "User-Agent: EmailApp-ProxyTest\r\n\r\n"
+                ).encode("ascii", errors="ignore")
+
+                wrapped = sock
+                if use_tls:
+                    ctx = ssl.create_default_context()
+                    wrapped = ctx.wrap_socket(sock, server_hostname=host)
+                    wrapped.settimeout(timeout)
+
+                wrapped.sendall(req)
+                chunks: list[bytes] = []
+                while True:
+                    chunk = wrapped.recv(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                ip = _extract_public_ip(b"".join(chunks).decode("utf-8", errors="replace"))
+                if not ip:
+                    return None, "ответ без IP"
+                return ip, None
+
+            def _fetch_public_ip_direct(timeout: int = 8) -> str | None:
+                for host, port, path, use_tls in ip_endpoints:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(timeout)
+                    try:
+                        s.connect((host, port))
+                        ip, _ = _read_ip_response(s, host, path, timeout, use_tls)
+                        if ip:
+                            return ip
+                    except Exception:
+                        continue
+                    finally:
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+                return None
+
+            def _fetch_public_ip_via_proxy(proxy: dict, timeout: int = 8) -> tuple[str | None, str | None]:
+                p_host = str(proxy.get("proxy_host") or "")
+                p_port = int(proxy.get("proxy_port") or 0)
+                p_type = str(proxy.get("proxy_type") or "").lower()
+                p_user = proxy.get("proxy_user")
+                p_pass = proxy.get("proxy_pass")
+
+                if socks is None:
+                    return None, "PySocks не установлен"
+
+                proxy_map = {
+                    "socks5": socks.SOCKS5,
+                    "socks4": socks.SOCKS4,
+                    "http": socks.HTTP,
+                    "https": socks.HTTP,
+                }
+                pconst = proxy_map.get(p_type)
+                if pconst is None:
+                    return None, f"неизвестный тип прокси: {p_type}"
+
+                last_error: str | None = None
+                for host, port, path, use_tls in ip_endpoints:
+                    s = socks.socksocket()
+                    s.settimeout(timeout)
+                    try:
+                        s.set_proxy(
+                            proxy_type=pconst,
+                            addr=p_host,
+                            port=p_port,
+                            rdns=True,
+                            username=str(p_user) if p_user else None,
+                            password=str(p_pass) if p_pass else None,
+                        )
+                        s.connect((host, port))
+                        ip, err = _read_ip_response(s, host, path, timeout, use_tls)
+                        if ip:
+                            return ip, None
+                        last_error = err or "ответ без IP"
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = _humanize_error_ru(exc)
+                    finally:
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+                return None, last_error or "не удалось определить выходной IP"
+
+            direct_public_ip = _fetch_public_ip_direct()
             emit("Старт теста прокси...")
+            emit(f"Ваш внешний IP (без прокси): {direct_public_ip or 'не удалось определить'}")
             if smtp_target_host and smtp_target_port:
                 emit(f"Цель для туннеля: {smtp_target_host}:{smtp_target_port}")
             else:
@@ -3442,6 +4114,7 @@ class ModernEmailAppGUI:
 
                 if not (smtp_target_host and smtp_target_port):
                     ok += 1
+                    valid_proxies.append(proxy)
                     emit("  ℹ️ туннель SMTP пропущен")
                     continue
 
@@ -3452,6 +4125,26 @@ class ModernEmailAppGUI:
                 else:
                     bad += 1
                     emit(f"  ❌ SMTP tunnel failed: {tunnel_msg}")
+
+                proxy_public_ip, proxy_ip_error = _fetch_public_ip_via_proxy(proxy)
+                if proxy_public_ip:
+                    emit(f"  🌐 Выходной IP прокси: {proxy_public_ip}")
+                    if direct_public_ip and proxy_public_ip == direct_public_ip:
+                        bad += 1
+                        emit("  ❌ LEAK: прокси возвращает ваш реальный IP (блокируется)")
+                        continue
+                else:
+                    gateway_ip = str(host or "").strip()
+                    emit(
+                        "  ⚠️ Не удалось определить выходной IP через web-сервисы "
+                        f"({proxy_ip_error or 'unknown error'})."
+                    )
+                    if gateway_ip:
+                        emit(f"  ℹ️ IP шлюза прокси: {gateway_ip} (это не всегда exit-IP)")
+                        if direct_public_ip and gateway_ip == direct_public_ip:
+                            bad += 1
+                            emit("  ❌ LEAK: IP шлюза совпадает с вашим реальным IP (блокируется)")
+                            continue
 
                 probe_465_ok = False
                 probe_587_ok = False
@@ -3474,11 +4167,23 @@ class ModernEmailAppGUI:
                     if probe_587_ok:
                         ports_ok.append("587")
                     emit(f"  🟢 SMTP-ready: да (порты: {', '.join(ports_ok)})")
+                    if tunnel_ok:
+                        valid_proxies.append(proxy)
                 else:
                     emit("  🔴 SMTP-ready: нет (465/587 недоступны через прокси)")
 
             emit("")
             emit(f"Итог: ✅ {ok} | ❌ {bad} | SMTP-ready: {smtp_ready}/{len(proxies)}")
+            if auto_clean_proxy_var.get():
+                try:
+                    kept, removed = self._rewrite_proxy_file(proxy_file, valid_proxies, len(proxies))
+                    if kept == 0 and removed == 0 and len(valid_proxies) == 0:
+                        emit("ℹ️ Автоочистка прокси отменена пользователем")
+                        return
+                    emit(f"🧹 Файл прокси обновлён: оставлено {kept}, удалено {removed}")
+                    self._append_log(f"Автоочистка прокси: {proxy_file} | оставлено={kept}, удалено={removed}")
+                except Exception as error:  # noqa: BLE001
+                    emit(f"❌ Ошибка автоочистки прокси: {error}")
 
         q: _queue.Queue[tuple[str, object]] = _queue.Queue()
         state = {"running": False}
@@ -3594,8 +4299,11 @@ class ModernEmailAppGUI:
             "dry_run": self.dry_run_var.get(),
             "replyto": self.replyto_var.get(),
             "replyto_mode": self.replyto_mode_var.get(),
+            "disable_replyto": self.disable_replyto_var.get(),
             "theme": self.theme_var.get(),
             "attachments_folder": self.attachments_folder_var.get(),
+              "sender_names_file": self.sender_names_file_var.get(),
+              "sender_names_mode": self.sender_names_mode_var.get(),
         }
         session_path = self.base_dir / self._SESSION_FILE
         try:
@@ -3640,6 +4348,8 @@ class ModernEmailAppGUI:
             ("replyto_mode", self.replyto_mode_var),
             ("theme", self.theme_var),
             ("attachments_folder", self.attachments_folder_var),
+              ("sender_names_file", self.sender_names_file_var),
+              ("sender_names_mode", self.sender_names_mode_var),
         ]
         for key, var in str_pairs:
             if key in data and data[key] is not None:
@@ -3658,6 +4368,7 @@ class ModernEmailAppGUI:
             ("proxy_enabled", self.proxy_enabled_var),
             ("parallel_enabled", self.parallel_enabled_var),
             ("dry_run", self.dry_run_var),
+            ("disable_replyto", self.disable_replyto_var),
         ]
         for key, var in bool_pairs:
             if key in data:
@@ -3681,6 +4392,9 @@ class ModernEmailAppGUI:
             return
 
         smtp_raw = raw.get("smtp") or {}
+        proxy_file = str(smtp_raw.get("proxy_file") or "").strip()
+        if proxy_file:
+            self.proxy_file_var.set(proxy_file)
         proxy_type = str(smtp_raw.get("proxy_type") or "").strip().lower()
         if proxy_type in {"socks5", "socks4", "http"}:
             self.proxy_type_var.set(proxy_type)

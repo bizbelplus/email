@@ -37,7 +37,7 @@ def _build_smtp_settings(mapping: dict[str, Any]) -> SMTPSettings:
         username=str(_require(mapping, "username")),
         password=str(_require(mapping, "password")),
         from_email=str(_require(mapping, "from_email")),
-        from_name=str(_require(mapping, "from_name")),
+        from_name=str(mapping.get("from_name") or "").strip(),
         use_tls=_parse_bool(mapping.get("use_tls", True), True),
         use_ssl=_parse_bool(mapping.get("use_ssl", False), False),
         timeout_seconds=int(mapping.get("timeout_seconds", 30)),
@@ -86,10 +86,10 @@ def _load_smtp_accounts_txt(
 
             if "|" in line:
                 parts = [item.strip() for item in line.split("|")]
-                if len(parts) < 6:
+                if len(parts) < 5:
                     raise ConfigError(
-                        "TXT-файл SMTP-аккаунтов должен содержать минимум 6 полей через '|': "
-                        "host|port|username|password|from_email|from_name"
+                        "TXT-файл SMTP-аккаунтов должен содержать минимум 5 полей через '|': "
+                        "host|port|username|password|from_email[|from_name]"
                         f" (строка {line_number})"
                     )
 
@@ -99,7 +99,7 @@ def _load_smtp_accounts_txt(
                     "username": parts[2],
                     "password": parts[3],
                     "from_email": parts[4],
-                    "from_name": parts[5],
+                    "from_name": parts[5] if len(parts) > 5 else "",
                     "use_tls": _parse_bool(parts[6], True) if len(parts) > 6 else True,
                     "use_ssl": _parse_bool(parts[7], False) if len(parts) > 7 else False,
                     "timeout_seconds": int(parts[8]) if len(parts) > 8 and parts[8] else int(defaults.get("timeout_seconds", 30) or 30),
@@ -150,7 +150,7 @@ def _load_smtp_accounts_txt(
                     use_tls = True
                     use_ssl = False
 
-            from_name = str(defaults.get("from_name") or Path(username).stem or username)
+            from_name = str(defaults.get("from_name") or "").strip()
 
             mapping = {
                 "host": host,
@@ -193,7 +193,17 @@ def load_config(config_path: str | Path) -> AppConfig:
     content_raw = raw_data.get("content") or {}
     accounts_file_value = smtp_raw.get("accounts_file")
     if accounts_file_value:
-        smtp_accounts = _load_smtp_accounts(path.parent.parent / str(accounts_file_value))
+        _acf_path = path.parent.parent / str(accounts_file_value)
+        if _acf_path.suffix.lower() == ".txt":
+            from .smtp_domains import load_domains as _load_domains_cfg
+            _domains_db = _load_domains_cfg(path.parent.parent)
+            smtp_accounts = _load_smtp_accounts_txt(
+                _acf_path,
+                defaults=smtp_raw,
+                domains_db=_domains_db,
+            )
+        else:
+            smtp_accounts = _load_smtp_accounts(_acf_path)
     else:
         smtp_accounts = [_build_smtp_settings(smtp_raw)]
 

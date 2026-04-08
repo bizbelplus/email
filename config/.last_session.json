@@ -1,0 +1,22 @@
+{
+  "recipients": "recipients.csv",
+  "templates": "templates",
+  "smtp_accounts_file": "",
+  "subjects_file": "",
+  "subjects_mode": "random",
+  "template": "email-template copy 2.html",
+  "proxy_file": "config/proxies.txt",
+  "proxy_enabled": true,
+  "delay": "0",
+  "rate_limit": "",
+  "retry_attempts": "3",
+  "retry_backoff": "5",
+  "parallel_smtp": "1",
+  "parallel_enabled": false,
+  "batch_interval": "0",
+  "dry_run": true,
+  "replyto": "",
+  "replyto_mode": "random",
+  "theme": "dark",
+  "attachments_folder": ""
+}

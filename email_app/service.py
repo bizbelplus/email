@@ -671,10 +671,13 @@ def run_campaign(
     batch_interval_seconds: float | None = None,
     reply_to_override: str | None = None,
     reply_to_mode_override: str | None = None,
+    force_no_reply_to: bool = False,
     stop_event: threading.Event | None = None,
     pause_event: threading.Event | None = None,
     runtime_overrides_getter: Callable[[], dict[str, object]] | None = None,
     progress_callback: Callable[[str], None] | None = None,
+    sender_names: list[str] | None = None,
+    sender_names_mode: str = "random",
 ) -> CampaignSummary:
     try:
         config = load_config(config_path)
@@ -721,8 +724,12 @@ def run_campaign(
         config.message.reply_to = normalized_reply_to or None
 
     reply_to_mode = (str(reply_to_mode_override).strip().lower() if reply_to_mode_override is not None else "random")
-    if reply_to_mode not in {"random", "fixed"}:
+    if reply_to_mode not in {"random", "fixed", "none"}:
         reply_to_mode = "random"
+
+    if force_no_reply_to:
+        reply_to_mode = "none"
+        config.message.reply_to = None
 
     if random_attachments_folder_override:
         config.message.random_attachments_folder = random_attachments_folder_override
@@ -786,13 +793,26 @@ def run_campaign(
         if proxy_file.exists()
         else []
     )
+    has_account_level_proxy = any(
+        bool(getattr(account, "proxy_host", None))
+        and bool(getattr(account, "proxy_port", None))
+        and bool(getattr(account, "proxy_type", None))
+        for account in runtime_smtp_accounts
+    )
+    if use_proxy and not proxies and not has_account_level_proxy:
+        raise CampaignError(
+            "Прокси включены, но не найден ни один рабочий прокси (файл пуст/недоступен и в SMTP-аккаунтах нет proxy_host/proxy_port/proxy_type)."
+        )
 
     # --- Reply-To list ---
-    reply_to_candidates = _load_reply_to_list(base_dir)
-    if not reply_to_candidates and config.message.reply_to:
-        reply_to_candidates = [config.message.reply_to]
-    if reply_to_mode == "fixed" and config.message.reply_to:
-        reply_to_candidates = [config.message.reply_to]
+    if reply_to_mode == "none":
+        reply_to_candidates = []
+    else:
+        reply_to_candidates = _load_reply_to_list(base_dir)
+        if not reply_to_candidates and config.message.reply_to:
+            reply_to_candidates = [config.message.reply_to]
+        if reply_to_mode == "fixed" and config.message.reply_to:
+            reply_to_candidates = [config.message.reply_to]
 
     delay_seconds = config.delivery.delay_seconds if delay_override is None else max(delay_override, 0.0)
     
@@ -807,6 +827,57 @@ def run_campaign(
     failed = 0
     processed = 0
     dedupe_sent_set: set[str] = set()
+    sender_names_list: list[str] = [s.strip() for s in (sender_names or []) if s.strip()]
+    sender_names_rr_index: int = 0
+    smtp_accounts_lock = threading.Lock()
+    blocked_smtp_keys: set[str] = set()
+    blocked_smtp_reasons: dict[str, tuple[str, str]] = {}
+
+    def _smtp_key(settings) -> str:
+        return (
+            f"{str(getattr(settings, 'host', '')).strip().lower()}|"
+            f"{int(getattr(settings, 'port', 0) or 0)}|"
+            f"{str(getattr(settings, 'username', '')).strip().lower()}"
+        )
+
+    def _snapshot_active_smtp_accounts() -> list[object]:
+        with smtp_accounts_lock:
+            return [deepcopy(acc) for acc in runtime_smtp_accounts if _smtp_key(acc) not in blocked_smtp_keys]
+
+    def _mark_smtp_account_blocked(settings, reason: str) -> None:
+        key = _smtp_key(settings)
+        account_email = str(getattr(settings, "from_email", getattr(settings, "username", "unknown")) or "unknown")
+        with smtp_accounts_lock:
+            if key in blocked_smtp_keys:
+                return
+            blocked_smtp_keys.add(key)
+            blocked_smtp_reasons[key] = (account_email, reason)
+            runtime_smtp_accounts[:] = [acc for acc in runtime_smtp_accounts if _smtp_key(acc) != key]
+            left = len(runtime_smtp_accounts)
+        emit(
+            f"🚫 SMTP-аккаунт исключён из пула: {account_email} "
+            f"(причина: {reason}, осталось: {left})"
+        )
+
+    def _is_unusable_smtp_error(error: Exception | str) -> bool:
+        low = str(error).lower()
+        markers = (
+            "authentication",
+            "535",
+            "username and password not accepted",
+            "account disabled",
+            "account blocked",
+            "temporarily locked",
+            "daily user sending quota exceeded",
+            "daily sending quota",
+            "too many messages",
+            "sender denied",
+            "mailbox unavailable",
+            "5.7.",
+            "5.5.",
+            "invalid credentials",
+        )
+        return any(marker in low for marker in markers)
     if config.delivery.skip_previously_sent:
         dedupe_sent_set = _build_dedupe_sent_set(
             history_csv_path=history_csv_path,
@@ -931,13 +1002,45 @@ def run_campaign(
 
     def _send_task(recipient_index: int, recipient: Recipient, mailer_settings, proxy_list, reply_to_candidates):
         nonlocal successful, failed, processed, runtime_template_round_robin_index
-        local_mailer = SMTPMailer(deepcopy(mailer_settings))
-
-        proxy_info = "none"
+        nonlocal sender_names_rr_index
         send_attempts = 0
 
-        def _apply_proxy_for_attempt(attempt_no: int) -> None:
-            nonlocal proxy_info, send_attempts
+        primary_settings = deepcopy(mailer_settings)
+        active_accounts = _snapshot_active_smtp_accounts()
+        if not active_accounts:
+            return {
+                "message": f"[ERROR] {recipient_index}/{len(recipients)} {recipient.email}: нет активных SMTP-аккаунтов",
+                "status": "error",
+                "error_msg": "нет активных SMTP-аккаунтов",
+                "success_delta": 0,
+                "fail_delta": 1,
+                "sent": False,
+                "recipient": recipient.email,
+                "subject": config.message.subject,
+                "smtp_account": "",
+                "proxy": "n/a",
+                "reply_to": "",
+                "template": runtime_template_name,
+                "dry_run": str(dry_run).lower(),
+            }
+
+        primary_key = _smtp_key(primary_settings)
+        active_keys = {_smtp_key(acc) for acc in active_accounts}
+        candidates: list[object] = [primary_settings] if primary_key in active_keys else []
+        for account in active_accounts:
+            if _smtp_key(account) != primary_key:
+                candidates.append(account)
+
+        last_reason_ru = ""
+        last_proxy_info = "none"
+        selected_template_name = runtime_template_name
+        selected_reply_to = ""
+        smtp_account = ""
+        selected_subject = config.message.subject
+
+        def _apply_proxy_for_attempt(local_mailer, attempt_no: int) -> str:
+            proxy_info_local = "none"
+            nonlocal send_attempts
             send_attempts = attempt_no
             if use_proxy:
                 if proxy_list:
@@ -947,98 +1050,120 @@ def run_campaign(
                     local_mailer.settings.proxy_type = proxy.get("proxy_type")
                     local_mailer.settings.proxy_user = proxy.get("proxy_user")
                     local_mailer.settings.proxy_pass = proxy.get("proxy_pass")
-                    proxy_info = f"{local_mailer.settings.proxy_type}:{local_mailer.settings.proxy_host}:{local_mailer.settings.proxy_port}"
+                    proxy_info_local = f"{local_mailer.settings.proxy_type}:{local_mailer.settings.proxy_host}:{local_mailer.settings.proxy_port}"
                 elif local_mailer.settings.proxy_host and local_mailer.settings.proxy_port and local_mailer.settings.proxy_type:
-                    proxy_info = (
+                    proxy_info_local = (
                         f"{local_mailer.settings.proxy_type}:"
                         f"{local_mailer.settings.proxy_host}:"
                         f"{local_mailer.settings.proxy_port}"
                     )
                 else:
-                    proxy_info = "enabled-but-not-configured"
+                    raise RuntimeError(
+                        "Прокси включены, но для отправки не удалось применить прокси (нет валидных записей в файле и нет proxy-настроек в аккаунте)."
+                    )
             else:
                 local_mailer.settings.proxy_host = None
                 local_mailer.settings.proxy_port = None
                 local_mailer.settings.proxy_type = None
                 local_mailer.settings.proxy_user = None
                 local_mailer.settings.proxy_pass = None
-                proxy_info = "none"
+                proxy_info_local = "none"
+            return proxy_info_local
 
-        _apply_proxy_for_attempt(1)
+        for candidate_index, candidate_settings in enumerate(candidates, start=1):
+            local_mailer = SMTPMailer(deepcopy(candidate_settings))
+            if sender_names_list:
+                if sender_names_mode == "sequential":
+                    picked_name = sender_names_list[sender_names_rr_index % len(sender_names_list)]
+                    sender_names_rr_index += 1
+                else:
+                    picked_name = random.choice(sender_names_list)
+                local_mailer.settings.from_name = picked_name
 
-        selected_reply_to = random.choice(reply_to_candidates) if reply_to_candidates else config.message.reply_to
-        message_settings = _copy_message_settings(config.message, selected_reply_to)
-        if runtime_subject_mode_key == "random_recipient" and runtime_subject_variants:
-            message_settings.subject = random.choice(runtime_subject_variants)
-        else:
-            message_settings.subject = runtime_subject_campaign_value
-
-        selected_template_name = runtime_template_name
-        if runtime_template_mode_key == "random_recipient" and runtime_template_variants:
-            selected_template_name = random.choice(runtime_template_variants)
-        elif runtime_template_mode_key == "round_robin" and runtime_template_variants:
-            idx = runtime_template_round_robin_index % len(runtime_template_variants)
-            selected_template_name = runtime_template_variants[idx]
-            runtime_template_round_robin_index += 1
-
-        selected_template_subtype, selected_inline_images = _resolve_template_assets(selected_template_name)
-
-        smtp_account = local_mailer.settings.from_email
-        recipient_key = recipient.email.strip().lower()
-        recipient_text_context: dict[str, str] = {}
-        if text_mode == "random_recipient" and text_variants:
-            recipient_text = random.choice(text_variants)
-            recipient_text_context = {
-                "body_text": recipient_text,
-                "message_text": recipient_text,
-            }
-
-        try:
-            runtime_context = _prepare_template_context(
-                renderer,
-                selected_template_name,
-                {
-                    **config.content,
-                    **recipient_text_context,
-                    "subject": message_settings.subject,
-                    "inline_images": _build_inline_context(selected_inline_images),
-                    "smtp": {
-                        "host": local_mailer.settings.host,
-                        "port": local_mailer.settings.port,
-                        "username": local_mailer.settings.username,
-                        "from_email": local_mailer.settings.from_email,
-                        "from_name": local_mailer.settings.from_name,
-                        "use_tls": local_mailer.settings.use_tls,
-                        "use_ssl": local_mailer.settings.use_ssl,
-                    },
-                },
+            selected_reply_to = random.choice(reply_to_candidates) if reply_to_candidates else config.message.reply_to
+            message_settings = _copy_message_settings(config.message, selected_reply_to)
+            if runtime_subject_mode_key == "random_recipient" and runtime_subject_variants:
+                message_settings.subject = random.choice(runtime_subject_variants)
+            else:
+                message_settings.subject = runtime_subject_campaign_value
+            message_settings.subject = renderer.render_legacy_text(
+                str(message_settings.subject or ""),
+                {**recipient.data, "email": recipient.email},
             )
-            html_body = renderer.render(
-                template_name=selected_template_name,
-                recipient=recipient,
-                context=runtime_context,
-            )
-        except TemplateRenderError as error:
-            raise CampaignError(f"Ошибка рендера шаблона для {recipient.email}: {error}") from error
+            selected_subject = message_settings.subject
 
-        recipient_attachment_paths = list(attachment_paths)
-        if random_attachment_files:
-            recipient_attachment_paths.append(random.choice(random_attachment_files))
+            selected_template_name = runtime_template_name
+            if runtime_template_mode_key == "random_recipient" and runtime_template_variants:
+                selected_template_name = random.choice(runtime_template_variants)
+            elif runtime_template_mode_key == "round_robin" and runtime_template_variants:
+                idx = runtime_template_round_robin_index % len(runtime_template_variants)
+                selected_template_name = runtime_template_variants[idx]
+                runtime_template_round_robin_index += 1
 
-        reply_to_info = selected_reply_to or "not-set"
+            selected_template_subtype, selected_inline_images = _resolve_template_assets(selected_template_name)
 
-        if dry_run:
-            message = (
-                f"[DRY-RUN] {recipient_index}/{len(recipients)} подготовлено для {recipient.email} "
-                f"(subject={message_settings.subject}, smtp={smtp_account}, proxy={proxy_info}, reply_to={reply_to_info})"
-            )
-            status = "dry-run"
-            error_msg = ""
-            success_delta = 1
-            fail_delta = 0
-            sent = False
-        else:
+            smtp_account = local_mailer.settings.from_email
+            recipient_text_context: dict[str, str] = {}
+            if text_mode == "random_recipient" and text_variants:
+                recipient_text = random.choice(text_variants)
+                recipient_text_context = {
+                    "body_text": recipient_text,
+                    "message_text": recipient_text,
+                }
+
             try:
+                runtime_context = _prepare_template_context(
+                    renderer,
+                    selected_template_name,
+                    {
+                        **config.content,
+                        **recipient_text_context,
+                        "subject": message_settings.subject,
+                        "inline_images": _build_inline_context(selected_inline_images),
+                        "smtp": {
+                            "host": local_mailer.settings.host,
+                            "port": local_mailer.settings.port,
+                            "username": local_mailer.settings.username,
+                            "from_email": local_mailer.settings.from_email,
+                            "from_name": local_mailer.settings.from_name,
+                            "use_tls": local_mailer.settings.use_tls,
+                            "use_ssl": local_mailer.settings.use_ssl,
+                        },
+                    },
+                )
+                html_body = renderer.render(
+                    template_name=selected_template_name,
+                    recipient=recipient,
+                    context=runtime_context,
+                )
+            except TemplateRenderError as error:
+                raise CampaignError(f"Ошибка рендера шаблона для {recipient.email}: {error}") from error
+
+            recipient_attachment_paths = list(attachment_paths)
+            if random_attachment_files:
+                recipient_attachment_paths.append(random.choice(random_attachment_files))
+
+            reply_to_info = selected_reply_to or "not-set"
+
+            if dry_run:
+                message = (
+                    f"[DRY-RUN] {recipient_index}/{len(recipients)} подготовлено для {recipient.email} "
+                    f"(subject={message_settings.subject}, smtp={smtp_account}, proxy=n/a, reply_to={reply_to_info})"
+                )
+                status = "dry-run"
+                error_msg = ""
+                success_delta = 1
+                fail_delta = 0
+                sent = False
+                last_proxy_info = "n/a"
+                break
+
+            last_proxy_info = "none"
+            try:
+                def _before_attempt(attempt_no: int) -> None:
+                    nonlocal last_proxy_info
+                    last_proxy_info = _apply_proxy_for_attempt(local_mailer, attempt_no)
+
                 _send_with_retry(
                     mailer=local_mailer,
                     recipient=recipient,
@@ -1049,28 +1174,50 @@ def run_campaign(
                     inline_image_paths=selected_inline_images,
                     retry_attempts=config.delivery.retry_attempts,
                     retry_backoff_seconds=config.delivery.retry_backoff_seconds,
-                    before_attempt=_apply_proxy_for_attempt,
+                    before_attempt=_before_attempt,
                 )
                 message = (
                     f"[OK] {recipient_index}/{len(recipients)} отправлено: {recipient.email} "
-                    f"через {smtp_account} subject={message_settings.subject} proxy={proxy_info} reply_to={reply_to_info} attempts={send_attempts}"
+                    f"через {smtp_account} subject={message_settings.subject} proxy={last_proxy_info} reply_to={reply_to_info} attempts={send_attempts}"
                 )
                 status = "sent"
                 error_msg = ""
                 success_delta = 1
                 fail_delta = 0
                 sent = True
+                break
             except Exception as error:
                 reason_ru = _humanize_error_ru(error)
+                last_reason_ru = reason_ru
+                if _is_unusable_smtp_error(error):
+                    _mark_smtp_account_blocked(local_mailer.settings, reason_ru)
+                if candidate_index < len(candidates):
+                    emit(
+                        f"⚠️ SMTP {smtp_account} не отправил письмо для {recipient.email}: {reason_ru}. "
+                        "Пробуем следующий SMTP-аккаунт..."
+                    )
+                    continue
+
                 message = (
                     f"[ERROR] {recipient_index}/{len(recipients)} {recipient.email}: {reason_ru} "
-                    f"(subject={message_settings.subject}, smtp={smtp_account}, proxy={proxy_info}, reply_to={reply_to_info}, attempts={send_attempts})"
+                    f"(subject={message_settings.subject}, smtp={smtp_account}, proxy={last_proxy_info}, reply_to={reply_to_info}, attempts={send_attempts})"
                 )
                 status = "error"
                 error_msg = reason_ru
                 success_delta = 0
                 fail_delta = 1
                 sent = False
+
+        else:
+            message = (
+                f"[ERROR] {recipient_index}/{len(recipients)} {recipient.email}: {last_reason_ru or 'все SMTP-аккаунты недоступны'} "
+                f"(subject={selected_subject}, smtp={smtp_account}, proxy={last_proxy_info}, reply_to={selected_reply_to or 'not-set'}, attempts={send_attempts})"
+            )
+            status = "error"
+            error_msg = last_reason_ru or "все SMTP-аккаунты недоступны"
+            success_delta = 0
+            fail_delta = 1
+            sent = False
 
         return {
             "message": message,
@@ -1080,9 +1227,9 @@ def run_campaign(
             "fail_delta": fail_delta,
             "sent": sent,
             "recipient": recipient.email,
-            "subject": message_settings.subject,
+            "subject": selected_subject,
             "smtp_account": smtp_account,
-            "proxy": proxy_info,
+            "proxy": last_proxy_info,
             "reply_to": selected_reply_to or "",
             "template": selected_template_name,
             "dry_run": str(dry_run).lower(),
@@ -1227,6 +1374,10 @@ def run_campaign(
         successful,
         failed,
     )
+    if blocked_smtp_reasons:
+        emit(f"🧹 Исключено SMTP-аккаунтов: {len(blocked_smtp_reasons)}")
+        for _key, (account_email, reason) in blocked_smtp_reasons.items():
+            emit(f"   - {account_email}: {reason}")
     return CampaignSummary(
         total=len(recipients),
         processed=processed,

@@ -34,10 +34,12 @@ pyinstaller ^
   --onedir ^
   --windowed ^
   --name "Email App" ^
+  --collect-submodules email_app ^
   --add-data "templates;templates" ^
   --add-data "config;config" ^
   --add-data "files;files" ^
   --add-data "presets;presets" ^
+  --add-data "email_app;email_app" ^
   --add-data "recipients.csv;." ^
   --collect-all customtkinter ^
   --collect-all tkhtmlview ^
